@@ -10,7 +10,7 @@ export type RoundStats = {
 }
 
 export type ParticipantStats = {
-  rounds: [RoundStats, RoundStats, RoundStats]
+  rounds: RoundStats[]
 }
 
 export type TournamentGroup = {
@@ -50,6 +50,8 @@ export type KnockoutMatch = {
   player1Id: string | null
   player2Id: string | null
   winnerId: string | null
+  kdaRoundCount: number
+  stats: Record<string, ParticipantStats>
 }
 
 export type KnockoutBracket = {
@@ -59,9 +61,17 @@ export type KnockoutBracket = {
   rounds: KnockoutMatch[][]
 }
 
+export type HeroContent = {
+  titleLine1: string
+  titleLine2: string
+  lead: string
+  tags: string[]
+}
+
 export type TournamentState = {
   participants: Participant[]
   groupCount: number
+  groupRoundCount: number
   groups: TournamentGroup[]
   stats: Record<string, ParticipantStats>
   knockoutBracket: KnockoutBracket | null

@@ -73,15 +73,6 @@ function isPowerOfTwo(value: number): boolean {
   return value >= 4 && value <= 32 && (value & (value - 1)) === 0
 }
 
-/**
- * KO-Regeln:
- * - 4–7 Teilnehmer: immer vier Qualifikanten.
- *   - bei 1 Gruppe: Top 4 dieser Gruppe,
- *   - bei >=2 gewünschten Gruppen: automatisch 2 Gruppen, Top 2 je Gruppe.
- *   Die 50%-Grenze darf in diesem Sonderfall überschritten werden.
- * - ab 8 Teilnehmern: mindestens Top 2 je Gruppe, höchstens 50% der kleinsten Gruppe,
- *   gleiche Zahl Qualifikanten je Gruppe, KO-Feld 4/8/16/32, maximal Sechzehntelfinale.
- */
 export function createQualificationPlan(participantCount: number, requestedGroupCount: number): QualificationPlan | null {
   const participants = Math.max(0, Math.trunc(participantCount))
   const requested = Math.max(1, Math.min(10, Math.trunc(requestedGroupCount)))
@@ -166,6 +157,17 @@ export function createQualificationPlanForExistingGroups(
   return plan
 }
 
+function newMatch(id: string, player1Id: string | null, player2Id: string | null): KnockoutMatch {
+  return {
+    id,
+    player1Id,
+    player2Id,
+    winnerId: null,
+    kdaRoundCount: 1,
+    stats: {},
+  }
+}
+
 function orderedGroupIndex(groups: TournamentGroup[]): Map<string, number> {
   return new Map(groups.map((group, index) => [group.id, index]))
 }
@@ -176,21 +178,11 @@ function pairSingleGroup(qualifiers: QualifiedPlayer[]): KnockoutMatch[] {
   for (let index = 0; index < sorted.length / 2; index += 1) {
     const high = sorted[index]
     const low = sorted[sorted.length - 1 - index]
-    matches.push({
-      id: `ko-r0-m${index}`,
-      player1Id: high.participantId,
-      player2Id: low.participantId,
-      winnerId: null,
-    })
+    matches.push(newMatch(`ko-r0-m${index}`, high.participantId, low.participantId))
   }
   return matches
 }
 
-/**
- * Mehrere Gruppen: hohe Gruppenplatzierung gegen niedrige Platzierung aus ANDERER Gruppe.
- * Top 2: A1-B2, B1-C2, ...; bei zwei Gruppen A1-B2 und B1-A2.
- * Top 4: #1 gegen #4 einer anderen Gruppe und #2 gegen #3 einer anderen Gruppe.
- */
 function pairCrossGroup(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]): KnockoutMatch[] {
   if (groups.length < 2 || qualifiers.length < 4) return []
 
@@ -214,12 +206,7 @@ function pairCrossGroup(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]
     const rotation = groups.length === 2 ? 1 : (rankIndex % (groups.length - 1)) + 1
     highPot.forEach((highSeed, index) => {
       const lowSeed = lowPot[(index + rotation) % lowPot.length]
-      matches.push({
-        id: `ko-r0-m${matches.length}`,
-        player1Id: highSeed.participantId,
-        player2Id: lowSeed.participantId,
-        winnerId: null,
-      })
+      matches.push(newMatch(`ko-r0-m${matches.length}`, highSeed.participantId, lowSeed.participantId))
     })
   }
 
@@ -260,14 +247,7 @@ export function createGlobalKnockoutBracket(
   let matchesInNextRound = firstRound.length / 2
   let roundIndex = 1
   while (matchesInNextRound >= 1) {
-    rounds.push(
-      Array.from({ length: matchesInNextRound }, (_, matchIndex) => ({
-        id: `ko-r${roundIndex}-m${matchIndex}`,
-        player1Id: null,
-        player2Id: null,
-        winnerId: null,
-      })),
-    )
+    rounds.push(Array.from({ length: matchesInNextRound }, (_, matchIndex) => newMatch(`ko-r${roundIndex}-m${matchIndex}`, null, null)))
     matchesInNextRound /= 2
     roundIndex += 1
   }
@@ -286,7 +266,12 @@ export function updateBracketWinner(
   matchIndex: number,
   winnerId: string | null,
 ): KnockoutBracket {
-  const rounds = bracket.rounds.map((round) => round.map((match) => ({ ...match })))
+  const rounds = bracket.rounds.map((round) => round.map((match) => ({
+    ...match,
+    stats: Object.fromEntries(Object.entries(match.stats ?? {}).map(([participantId, stats]) => [participantId, {
+      rounds: stats.rounds.map((roundStats) => ({ ...roundStats })),
+    }])),
+  })))
   const target = rounds[roundIndex]?.[matchIndex]
   if (!target) return bracket
 
@@ -298,8 +283,10 @@ export function updateBracketWinner(
     rounds[r].forEach((match, index) => {
       const player1Id = previousRound[index * 2]?.winnerId ?? null
       const player2Id = previousRound[index * 2 + 1]?.winnerId ?? null
+      const participantsChanged = match.player1Id !== player1Id || match.player2Id !== player2Id
       match.player1Id = player1Id
       match.player2Id = player2Id
+      if (participantsChanged) match.stats = {}
       if (match.winnerId !== player1Id && match.winnerId !== player2Id) match.winnerId = null
     })
   }

@@ -63,11 +63,11 @@ a{color:inherit;text-decoration:none}
   inset:0;
   pointer-events:none;
   z-index:-2;
-  opacity:.50;
+  opacity:.46;
   background-image:var(--floral-image);
   background-repeat:no-repeat;
-  background-position:right -18px top 118px;
-  background-size:430px auto;
+  background-position:right -18px top 470px;
+  background-size:420px auto;
   filter:drop-shadow(0 10px 26px rgba(0,0,0,.18));
   mask-image:linear-gradient(90deg, transparent 0%, rgba(0,0,0,.80) 16%, #000 40%, #000 88%, transparent 100%), linear-gradient(180deg, transparent 0%, #000 7%, #000 95%, transparent 100%);
   -webkit-mask-image:linear-gradient(90deg, transparent 0%, rgba(0,0,0,.80) 16%, #000 40%, #000 88%, transparent 100%), linear-gradient(180deg, transparent 0%, #000 7%, #000 95%, transparent 100%);
@@ -97,7 +97,7 @@ a{color:inherit;text-decoration:none}
   filter:drop-shadow(0 10px 22px rgba(0,0,0,.16));
 }
 .hero::before{
-  right:-58px;top:18px;width:420px;height:720px;opacity:.34;
+  right:-52px;top:12px;width:410px;height:700px;opacity:.32;
   background-position:top right;
   mask-image:linear-gradient(180deg, transparent 0%, #000 9%, #000 75%, transparent 100%), linear-gradient(90deg, transparent 0%, #000 26%, #000 100%);
   -webkit-mask-image:linear-gradient(180deg, transparent 0%, #000 9%, #000 75%, transparent 100%), linear-gradient(90deg, transparent 0%, #000 26%, #000 100%);
@@ -204,7 +204,7 @@ h4{color:#d5c6ea;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
   .settings-form-grid{grid-template-columns:1fr}
   .settings-wide{grid-column:auto}
   .round-setting-card{grid-template-columns:1fr 160px auto}
-  .app-shell::after{background-size:345px auto;opacity:.42}
+  .app-shell::after{background-size:335px auto;background-position:right -24px top 430px;opacity:.38}
   .hero::before{width:350px;height:620px;opacity:.27}
   .hero::after{width:310px;height:510px;opacity:.20}
 }
@@ -235,6 +235,6 @@ h4{color:#d5c6ea;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
   .twitch-player-tools{width:100%;justify-content:space-between;margin-left:0}
   .twitch-quality-control{flex:1}
   .twitch-quality-select{width:100%;max-width:180px}
-  .app-shell::after{background-size:255px auto;background-position:right -54px top 168px;opacity:.36}
+  .app-shell::after{background-size:245px auto;background-position:right -40px top 390px;opacity:.32}
   .panel::after{width:112px;height:174px;opacity:.14}
 }

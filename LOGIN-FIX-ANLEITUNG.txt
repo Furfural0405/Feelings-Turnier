@@ -1,0 +1,50 @@
+FEELINGS-TURNIER LOGIN-FIX
+==========================
+
+1. GITHUB
+---------
+Ersetze im Repository:
+  .github/workflows/static.yml
+
+mit der Datei aus diesem Patch und committe nach main.
+Der neue Workflow setzt beim Vite-Build:
+  VITE_SUPABASE_URL
+  VITE_SUPABASE_PUBLISHABLE_KEY
+
+Ohne diese Werte erzeugt die veröffentlichte App keinen Supabase-Client.
+
+2. SUPABASE AUTH URL CONFIGURATION
+----------------------------------
+Öffne in Supabase:
+Authentication -> URL Configuration
+
+Setze als Site URL:
+  https://furfural0405.github.io/Feelings-Turnier/
+
+Füge bei Redirect URLs mindestens hinzu:
+  https://furfural0405.github.io/Feelings-Turnier/
+
+Optional für lokale Entwicklung zusätzlich:
+  http://localhost:5173/**
+
+Die React-App übergibt bei Registrierung die aktuelle Seiten-URL als
+emailRedirectTo. Diese muss in Supabase erlaubt sein.
+
+3. SUPABASE DATENBANK
+---------------------
+Die produktive Datenbank wurde bereits korrigiert:
+- initialer vorhandener Account: approved=true, role=admin
+- RLS-Policies vorhanden
+- Admin-Prüfung in nicht exponiertes private-Schema verschoben
+- Trigger-Funktion für Browser-Rollen gesperrt
+
+supabase/setup.sql liegt nur bei, damit das GitHub-Repository dieselbe
+Konfiguration dokumentiert. Du musst es NICHT erneut ausführen.
+
+4. DANACH TESTEN
+----------------
+Nach dem GitHub-Commit den neuen Actions-Run abwarten, dann:
+  https://furfural0405.github.io/Feelings-Turnier/
+
+Login mit dem bereits in Supabase angelegten und bestätigten Admin-Account testen.
+Bei neuen Accounts: registrieren -> Bestätigungs-Mail öffnen -> danach Login.

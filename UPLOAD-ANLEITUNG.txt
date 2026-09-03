@@ -1,18 +1,21 @@
-FEELINGS-TURNIER – NPM 404 REPARATUR
+FEELINGS-TURNIER – ALLE TEILNEHMER GLEICHZEITIG LÖSCHEN
 
-Fehlerursache:
-GitHub Actions versucht electron-to-chromium 1.5.421 zu laden. Diese Version liefert aktuell 404.
+Bitte diese beiden Dateien in das GitHub-Repository kopieren bzw. ersetzen:
 
-Bitte im Repository ersetzen:
-1. package.json
-2. .github/workflows/static.yml
+1) .github/workflows/apply-participant-clear.yml
+2) scripts/apply_participant_clear.py
 
-Danach Commit auf main.
+Danach auf main committen.
 
-Der Fix:
-- pinnt die transitive Abhängigkeit electron-to-chromium auf 1.5.420
-- setzt die npm Registry explizit auf https://registry.npmjs.org/
-- behält Node.js 22 und die Node-24-kompatiblen GitHub Actions bei
-- benötigt weiterhin keine package-lock.json
+Der Workflow startet automatisch und:
+- ergänzt im Teilnehmer-Adminbereich den Button „Alle Teilnehmer löschen“
+- zeigt vor dem Löschen eine Sicherheitsabfrage
+- löscht alle Teilnehmer aus Supabase
+- setzt Gruppen, KDA-Werte und K.O.-Phase zurück
+- behält Gruppenanzahl und eingestellte Gruppen-Rundenzahl bei
+- baut die Webseite anschließend direkt neu
+- deployed die gepatchte Version direkt auf GitHub Pages
 
-Nach dem Commit startet der Pages-Workflow automatisch.
+WICHTIG:
+Für den Workflow müssen unter GitHub > Settings > Actions > General > Workflow permissions
+„Read and write permissions“ aktiviert sein.

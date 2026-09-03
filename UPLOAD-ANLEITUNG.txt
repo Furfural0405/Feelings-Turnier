@@ -1,17 +1,18 @@
-GitHub Actions Node-24-Warnung beheben
+FEELINGS-TURNIER – NPM 404 REPARATUR
 
-1. Öffne im Repository:
-   .github/workflows/static.yml
-2. Ersetze die bestehende Datei vollständig durch die Datei aus diesem ZIP.
-3. Committe die Änderung auf main.
-4. Unter GitHub > Actions sollte automatisch ein neuer Lauf starten.
+Fehlerursache:
+GitHub Actions versucht electron-to-chromium 1.5.421 zu laden. Diese Version liefert aktuell 404.
 
-Geändert:
-- actions/checkout@v4 -> @v6
-- actions/setup-node@v4 -> @v6
-- actions/configure-pages@v5 -> @v6
-- actions/upload-pages-artifact@v4 -> @v5
-- actions/deploy-pages bleibt @v5
-- npm install -> npm ci
-- npm cache für setup-node aktiviert
-- Projekt-Build bleibt auf Node.js 22
+Bitte im Repository ersetzen:
+1. package.json
+2. .github/workflows/static.yml
+
+Danach Commit auf main.
+
+Der Fix:
+- pinnt die transitive Abhängigkeit electron-to-chromium auf 1.5.420
+- setzt die npm Registry explizit auf https://registry.npmjs.org/
+- behält Node.js 22 und die Node-24-kompatiblen GitHub Actions bei
+- benötigt weiterhin keine package-lock.json
+
+Nach dem Commit startet der Pages-Workflow automatisch.

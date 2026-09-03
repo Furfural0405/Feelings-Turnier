@@ -1,5 +1,17 @@
-Ersetze im GitHub-Repository genau diese Datei:
+GitHub Actions Node-24-Warnung beheben
 
-src/styles.css
+1. Öffne im Repository:
+   .github/workflows/static.yml
+2. Ersetze die bestehende Datei vollständig durch die Datei aus diesem ZIP.
+3. Committe die Änderung auf main.
+4. Unter GitHub > Actions sollte automatisch ein neuer Lauf starten.
 
-Nicht zusätzlich hochladen, sondern die bestehende Datei überschreiben.
+Geändert:
+- actions/checkout@v4 -> @v6
+- actions/setup-node@v4 -> @v6
+- actions/configure-pages@v5 -> @v6
+- actions/upload-pages-artifact@v4 -> @v5
+- actions/deploy-pages bleibt @v5
+- npm install -> npm ci
+- npm cache für setup-node aktiviert
+- Projekt-Build bleibt auf Node.js 22

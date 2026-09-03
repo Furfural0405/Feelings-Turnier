@@ -36,6 +36,9 @@ type TwitchLiveState = 'checking' | 'live' | 'offline' | 'unavailable'
 type TwitchPlayerInstance = {
   addEventListener: (event: string, callback: () => void) => void
   setMuted: (muted: boolean) => void
+  getQualities: () => string[]
+  getQuality: () => string
+  setQuality: (quality: string) => void
 }
 
 type TwitchPlayerConstructor = {
@@ -43,6 +46,7 @@ type TwitchPlayerConstructor = {
   ONLINE: string
   OFFLINE: string
   READY: string
+  PLAYING: string
 }
 
 type TwitchWindow = Window & {
@@ -51,6 +55,24 @@ type TwitchWindow = Window & {
 
 const TWITCH_EMBED_SCRIPT_ID = 'twitch-embed-sdk'
 const TWITCH_PLAYER_HOST_ID = 'brume-twitch-player'
+const TWITCH_QUALITY_TARGETS = [360, 480, 720, 1080] as const
+
+type TwitchQualityKey = 'auto' | '360' | '480' | '720' | '1080'
+
+function qualityKeyForName(quality: string): TwitchQualityKey | null {
+  const normalized = quality.toLowerCase()
+  if (normalized === 'auto') return 'auto'
+  for (const target of TWITCH_QUALITY_TARGETS) {
+    if (normalized.startsWith(`${target}p`)) return String(target) as TwitchQualityKey
+  }
+  return null
+}
+
+function preferQualityName(current: string | undefined, candidate: string): string {
+  if (!current) return candidate
+  const fps = (value: string) => Number(value.match(/p(\d+)/i)?.[1] ?? 0)
+  return fps(candidate) > fps(current) ? candidate : current
+}
 
 const DEFAULT_HERO: HeroContent = {
   titleLine1: 'FEELINGS',
@@ -134,7 +156,10 @@ function App() {
   const [siteSaving, setSiteSaving] = useState(false)
   const [removingProfileId, setRemovingProfileId] = useState<string | null>(null)
   const [twitchLiveState, setTwitchLiveState] = useState<TwitchLiveState>('checking')
+  const [twitchQualities, setTwitchQualities] = useState<Partial<Record<TwitchQualityKey, string>>>({})
+  const [twitchSelectedQuality, setTwitchSelectedQuality] = useState<TwitchQualityKey>('auto')
   const twitchPlayerRef = useRef<HTMLDivElement>(null)
+  const twitchPlayerInstanceRef = useRef<TwitchPlayerInstance | null>(null)
   const importRef = useRef<HTMLInputElement>(null)
   const saveTimer = useRef<number | null>(null)
 
@@ -166,9 +191,37 @@ function App() {
   useEffect(() => {
     let disposed = false
     let statusTimeout: number | null = null
+    const qualityRefreshTimers: number[] = []
 
     const fail = () => {
       if (!disposed) setTwitchLiveState('unavailable')
+    }
+
+    const refreshQualities = (player: TwitchPlayerInstance) => {
+      if (disposed) return
+      try {
+        const available = player.getQualities() ?? []
+        const mapped: Partial<Record<TwitchQualityKey, string>> = {}
+        for (const quality of available) {
+          const key = qualityKeyForName(quality)
+          if (!key) continue
+          mapped[key] = preferQualityName(mapped[key], quality)
+        }
+        setTwitchQualities(mapped)
+
+        const currentName = player.getQuality()
+        const currentKey = Object.entries(mapped).find(([, value]) => value === currentName)?.[0] as TwitchQualityKey | undefined
+        if (currentKey) setTwitchSelectedQuality(currentKey)
+      } catch {
+        // Twitch kann die Qualitätsliste kurz nach READY noch nicht liefern.
+      }
+    }
+
+    const scheduleQualityRefresh = (player: TwitchPlayerInstance) => {
+      refreshQualities(player)
+      for (const delay of [900, 2500, 6000]) {
+        qualityRefreshTimers.push(window.setTimeout(() => refreshQualities(player), delay))
+      }
     }
 
     const initializePlayer = () => {
@@ -191,6 +244,7 @@ function App() {
           autoplay: true,
           muted: true,
         })
+        twitchPlayerInstanceRef.current = player
 
         const setLive = () => {
           if (disposed) return
@@ -206,8 +260,11 @@ function App() {
         player.addEventListener(twitch.Player.ONLINE, setLive)
         player.addEventListener(twitch.Player.OFFLINE, setOffline)
         player.addEventListener(twitch.Player.READY, () => {
-          if (!disposed) player.setMuted(true)
+          if (disposed) return
+          player.setMuted(true)
+          scheduleQualityRefresh(player)
         })
+        player.addEventListener(twitch.Player.PLAYING, () => refreshQualities(player))
 
         statusTimeout = window.setTimeout(() => {
           if (!disposed) setTwitchLiveState((current) => current === 'checking' ? 'unavailable' : current)
@@ -236,12 +293,26 @@ function App() {
     return () => {
       disposed = true
       if (statusTimeout !== null) window.clearTimeout(statusTimeout)
+      qualityRefreshTimers.forEach((timer) => window.clearTimeout(timer))
+      twitchPlayerInstanceRef.current = null
       const script = document.getElementById(TWITCH_EMBED_SCRIPT_ID)
       script?.removeEventListener('load', initializePlayer)
       script?.removeEventListener('error', fail)
       if (twitchPlayerRef.current) twitchPlayerRef.current.innerHTML = ''
     }
   }, [])
+
+  function changeTwitchQuality(key: TwitchQualityKey) {
+    const player = twitchPlayerInstanceRef.current
+    const quality = twitchQualities[key]
+    if (!player || !quality) return
+    try {
+      player.setQuality(quality)
+      setTwitchSelectedQuality(key)
+    } catch {
+      setNotice('Diese Twitch-Qualität konnte gerade nicht gesetzt werden.')
+    }
+  }
 
   useEffect(() => {
     if (!notice) return
@@ -795,7 +866,25 @@ function App() {
             </div>
             <div className="stream-card__actions">
               <span>{twitchLiveState === 'live' ? 'BrumeFeelings streamt gerade live.' : twitchLiveState === 'offline' ? 'Der Kanal ist aktuell offline.' : twitchLiveState === 'unavailable' ? 'Der Live-Status konnte gerade nicht geladen werden.' : 'Twitch-Status wird geladen.'}</span>
-              <a className="twitch-open-button" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">Auf Twitch öffnen ↗</a>
+              <div className="twitch-player-tools">
+                <label className="twitch-quality-control">
+                  <span>Qualität</span>
+                  <select
+                    className="twitch-quality-select"
+                    value={twitchSelectedQuality}
+                    onChange={(event) => changeTwitchQuality(event.target.value as TwitchQualityKey)}
+                    aria-label="Twitch Streamqualität auswählen"
+                  >
+                    <option value="auto" disabled={!twitchQualities.auto}>Auto{!twitchQualities.auto ? ' · nicht verfügbar' : ''}</option>
+                    {TWITCH_QUALITY_TARGETS.map((quality) => {
+                      const key = String(quality) as TwitchQualityKey
+                      const available = Boolean(twitchQualities[key])
+                      return <option key={quality} value={key} disabled={!available}>{quality}p{available ? '' : ' · nicht verfügbar'}</option>
+                    })}
+                  </select>
+                </label>
+                <a className="twitch-open-button" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">Auf Twitch öffnen ↗</a>
+              </div>
             </div>
           </div>
         </div>

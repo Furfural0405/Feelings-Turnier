@@ -64,3 +64,9 @@ Für diese Twitch-Änderung müssen in GitHub mindestens ersetzt werden:
 - src/styles.css
 
 Supabase muss für die Twitch-Funktion NICHT verändert werden.
+
+TWITCH QUALITÄT (NEU):
+- Im Mini-Player gibt es jetzt eine Qualitätsauswahl für 360p, 480p, 720p und 1080p.
+- Twitch entscheidet pro Live-Stream, welche Qualitätsstufen tatsächlich verfügbar sind.
+- Nicht verfügbare Stufen werden im Auswahlfeld deaktiviert angezeigt.
+- Die native Twitch-Qualitätsauswahl im Player bleibt ebenfalls vorhanden.

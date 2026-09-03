@@ -503,21 +503,39 @@ function App() {
     setAuthBusy(true)
     try {
       if (authMode === 'register') {
-        const redirectTo = `${window.location.origin}${window.location.pathname}`
-        const { error } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: redirectTo } })
-        if (error) {
-          const authError = error as { code?: string; status?: number; message?: string }
-          if (authError.code === 'over_email_send_rate_limit' || authError.status === 429) {
-            setNotice('Registrierung derzeit nicht möglich: Das Supabase-E-Mail-Limit wurde erreicht. Der Account wurde noch nicht angelegt. Bitte später erneut versuchen.')
-            return
+        const normalizedEmail = email.trim().toLowerCase()
+        const { data: registrationData, error: registrationError } = await supabase.functions.invoke('register-admin-request', {
+          body: { email: normalizedEmail, password },
+        })
+
+        if (registrationError) {
+          let message = typeof registrationData?.error === 'string' ? registrationData.error : ''
+          const context = (registrationError as { context?: Response }).context
+          if (!message && context) {
+            try {
+              const body = await context.clone().json() as { error?: string }
+              message = body.error ?? ''
+            } catch {
+              // Fallback auf die allgemeine Fehlermeldung unten.
+            }
           }
-          if (authError.message?.toLowerCase().includes('email address not authorized')) {
-            setNotice('Registrierung derzeit nicht möglich: Der Supabase-Standard-Maildienst darf diese Adresse nicht anschreiben. Für öffentliche Registrierungen muss Custom SMTP eingerichtet werden.')
-            return
-          }
-          throw error
+          throw new Error(message || 'Der Account konnte nicht angelegt werden. Bitte versuche es später erneut.')
         }
-        setNotice('Account angelegt. Prüfe deine E-Mail. Danach kann ausschließlich der Ersteller/Admin deinen Zugriff freischalten.')
+
+        if (registrationData?.ok !== true) {
+          throw new Error(typeof registrationData?.error === 'string' ? registrationData.error : 'Der Account konnte nicht angelegt werden.')
+        }
+
+        const { error: signInError } = await supabase.auth.signInWithPassword({ email: normalizedEmail, password })
+        if (signInError) {
+          setAuthMode('login')
+          setPassword('')
+          setNotice('Account wurde angelegt und wartet auf Freischaltung. Bitte melde dich jetzt normal an.')
+          return
+        }
+
+        setShowLogin(false)
+        setNotice('Account angelegt. Keine E-Mail-Bestätigung nötig – die Freischaltung durch den Ersteller/Admin steht noch aus.')
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
         if (error) throw error
@@ -773,7 +791,7 @@ function App() {
 
       <footer className="footer"><div className="container">FEELINGS//TOURNAMENT · secure admin mode · powered by Supabase</div></footer>
 
-      {showLogin && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false) }}><div className="auth-modal"><button className="modal-close" onClick={() => setShowLogin(false)}>×</button><p className="eyebrow">SECURE ACCESS</p><h2>{authMode === 'login' ? 'Admin Login' : 'Account registrieren'}</h2><p className="muted">Neue Accounts sind zunächst gesperrt. Ausschließlich der Ersteller/Admin kann sie freischalten.</p><form className="auth-form" onSubmit={(event) => void handleAuth(event)}><label>E-Mail<input className="text-input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Passwort<input className="text-input" type="password" minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="button button--twitch" disabled={authBusy || authLoading}>{authBusy ? 'Bitte warten …' : authMode === 'login' ? 'Einloggen' : 'Registrieren'}</button></form><button className="auth-switch" onClick={() => setAuthMode((mode) => mode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Noch keinen Account? Registrieren' : 'Bereits registriert? Zum Login'}</button></div></div>}
+      {showLogin && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false) }}><div className="auth-modal"><button className="modal-close" onClick={() => setShowLogin(false)}>×</button><p className="eyebrow">SECURE ACCESS</p><h2>{authMode === 'login' ? 'Admin Login' : 'Account registrieren'}</h2><p className="muted">Neue Accounts werden ohne Bestätigungs-Mail angelegt und bleiben zunächst gesperrt. Ausschließlich der Ersteller/Admin kann sie freischalten.</p><form className="auth-form" onSubmit={(event) => void handleAuth(event)}><label>E-Mail<input className="text-input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Passwort<input className="text-input" type="password" minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="button button--twitch" disabled={authBusy || authLoading}>{authBusy ? 'Bitte warten …' : authMode === 'login' ? 'Einloggen' : 'Registrieren'}</button></form><button className="auth-switch" onClick={() => setAuthMode((mode) => mode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Noch keinen Account? Registrieren' : 'Bereits registriert? Zum Login'}</button></div></div>}
     </div>
   )
 }

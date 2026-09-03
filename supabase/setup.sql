@@ -173,3 +173,61 @@ drop policy if exists "admin update site settings" on public.site_settings;
 create policy "public read site settings" on public.site_settings for select to anon, authenticated using (id = 1);
 create policy "admin insert site settings" on public.site_settings for insert to authenticated with check ((select private.is_approved_admin()) and id = 1);
 create policy "admin update site settings" on public.site_settings for update to authenticated using ((select private.is_approved_admin())) with check ((select private.is_approved_admin()) and id = 1);
+
+-- Supabase-only Registrierung ohne Signup-Bestätigungsmail.
+-- Die öffentliche Edge Function ruft diese Rate-Limit-Funktion ausschließlich mit service_role auf.
+create table if not exists private.registration_rate_limits (
+  id bigint generated always as identity primary key,
+  email_hash text not null,
+  ip_hash text not null,
+  attempted_at timestamptz not null default now()
+);
+
+create index if not exists registration_rate_limits_email_time_idx
+  on private.registration_rate_limits (email_hash, attempted_at desc);
+create index if not exists registration_rate_limits_ip_time_idx
+  on private.registration_rate_limits (ip_hash, attempted_at desc);
+
+revoke all on table private.registration_rate_limits from public, anon, authenticated;
+
+create or replace function public.check_registration_rate_limit(p_email text, p_ip text)
+returns boolean
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_email_hash text;
+  v_ip_hash text;
+  v_email_attempts integer;
+  v_ip_attempts integer;
+begin
+  v_email_hash := encode(extensions.digest(lower(trim(coalesce(p_email, ''))), 'sha256'), 'hex');
+  v_ip_hash := encode(extensions.digest(coalesce(nullif(trim(p_ip), ''), 'unknown'), 'sha256'), 'hex');
+
+  delete from private.registration_rate_limits
+  where attempted_at < now() - interval '24 hours';
+
+  select count(*) into v_email_attempts
+  from private.registration_rate_limits
+  where email_hash = v_email_hash
+    and attempted_at >= now() - interval '60 minutes';
+
+  select count(*) into v_ip_attempts
+  from private.registration_rate_limits
+  where ip_hash = v_ip_hash
+    and attempted_at >= now() - interval '15 minutes';
+
+  if v_email_attempts >= 3 or v_ip_attempts >= 8 then
+    return false;
+  end if;
+
+  insert into private.registration_rate_limits (email_hash, ip_hash)
+  values (v_email_hash, v_ip_hash);
+
+  return true;
+end;
+$$;
+
+revoke all on function public.check_registration_rate_limit(text, text) from public, anon, authenticated;
+grant execute on function public.check_registration_rate_limit(text, text) to service_role;

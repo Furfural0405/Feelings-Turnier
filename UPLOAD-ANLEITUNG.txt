@@ -1,32 +1,42 @@
-FEELINGS-TURNIER – ERSTELLER-ADMIN + ZUGRIFFSANFRAGEN FIX
+FEELINGS-TURNIER · SUPABASE-ONLY REGISTRIERUNG
+==============================================
 
-Die produktive Supabase-Datenbank wurde bereits angepasst.
-Du musst supabase/setup.sql NICHT manuell ausführen. Die Datei hält das Repository nur synchron.
+Was bereits LIVE in Supabase erledigt wurde:
+- Edge Function "register-admin-request" ist ACTIVE.
+- Neue Accounts werden serverseitig mit email_confirm=true angelegt.
+- Dadurch wird bei der Registrierung KEINE Bestätigungs-Mail versendet.
+- Der bestehende Passwort-Reset per E-Mail bleibt unverändert.
+- Neue Profile werden als viewer / approved=false / access_status=pending angelegt.
+- Nur turnier.admin@gmx.de darf Freigaben verwalten (bestehende RLS-Regel).
+- Rate-Limit ist aktiv: max. 3 Versuche pro E-Mail/60 Min. bzw. 8 pro IP/15 Min.
+- Für das Rate-Limit werden nur SHA-256-Hashes gespeichert.
 
-ERSTELLER / OWNER:
-- turnier.admin@gmx.de
-- Nur dieser Account darf andere Admins freischalten, ablehnen oder ihnen den Zugriff entziehen.
-- Andere freigeschaltete Admins können weiterhin Turnier-/Webseiteninhalte bearbeiten, aber keine Adminrechte vergeben.
+Was du in GitHub hochladen musst:
+1. src/App.tsx ersetzen
+2. supabase/setup.sql ersetzen (nur Referenz/Versionsstand; NICHT erneut manuell ausführen)
+3. Ordner supabase/functions/register-admin-request/ hinzufügen
+   - index.ts
+4. Commit nach main
 
-FÜR GITHUB ERSETZEN:
-- src/App.tsx
-- src/types.ts
-- supabase/setup.sql
+Wichtig:
+- Für die eigentliche Funktion musst du in Supabase NICHTS mehr anklicken.
+- E-Mail-Bestätigung in Supabase muss NICHT deaktiviert werden.
+- "Passwort vergessen" / Recovery bleibt beim bisherigen Mail-System.
+- Nach dem GitHub-Pages-Deploy registriert die Webseite über die Edge Function.
+- Ein neuer Account wird direkt eingeloggt, bleibt aber ohne Freischaltung gesperrt.
+- turnier.admin@gmx.de sieht die Anfrage anschließend in der Zugriffsverwaltung.
 
-Die übrigen Dateien im ZIP sind die zuletzt verwendete kumulative Version und können unverändert mit hochgeladen werden.
+Test nach Deployment:
+1. Ausloggen.
+2. Admin Login -> "Noch keinen Account? Registrieren".
+3. Eine neue Test-Mailadresse + Passwort (mind. 8 Zeichen) verwenden.
+4. Es darf KEINE Bestätigungs-Mail verlangt werden.
+5. Die Seite soll "Freischaltung ausstehend" anzeigen.
+6. Als turnier.admin@gmx.de einloggen.
+7. Die neue Anfrage muss unter Zugriffsfreigaben erscheinen.
+8. Freischalten oder ablehnen testen.
 
-NEU IN DER WEBSEITE:
-- Der Bereich „Admin-Zugriffsanfragen“ ist nur für turnier.admin@gmx.de sichtbar.
-- Status: Wartet / Freigeschaltet / Abgelehnt.
-- Aktionen: Freischalten / Ablehnen / Zugriff entziehen.
-- Erfolgreiche Neuregistrierungen werden für den Ersteller automatisch alle 10 Sekunden und beim Fokuswechsel aktualisiert.
-- Manuelles „Jetzt aktualisieren“ bleibt möglich.
-- Signup-Fehler durch das Supabase-E-Mail-Limit (HTTP 429) werden verständlich angezeigt.
-
-WICHTIG ZUR NEUREGISTRIERUNG:
-Der aktuell verwendete Supabase-Standard-Maildienst ist stark limitiert. Beim Test mit animargus@gmx.net wurde der Signup mit
-„email rate limit exceeded“ abgelehnt; deshalb wurde kein Account angelegt und es konnte keine Anfrage erscheinen.
-Für zuverlässige öffentliche Registrierungen sollte in Supabase ein eigener SMTP-Dienst eingerichtet werden:
-Authentication -> Emails / SMTP Settings.
-
-Danach die drei geänderten Dateien committen. GitHub Actions baut und veröffentlicht die Seite automatisch.
+Hinweis:
+Ein vollständiger Browser-End-to-End-Test der öffentlich erreichbaren Function konnte
+in der lokalen Tool-Umgebung wegen fehlender DNS-Auflösung nicht ausgeführt werden.
+Die Edge Function wurde von Supabase erfolgreich gebaut/deployed und ist ACTIVE.

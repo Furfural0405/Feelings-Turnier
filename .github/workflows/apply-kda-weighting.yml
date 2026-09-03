@@ -2,6 +2,12 @@ name: Apply KDA weighting update
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/apply_kda_weighting.py'
+      - '.github/workflows/apply-kda-weighting.yml'
 
 permissions:
   contents: write
@@ -18,14 +24,14 @@ jobs:
       - name: Apply KDA weighting patch
         run: python scripts/apply_kda_weighting.py
 
-      - name: Commit update
+      - name: Commit KDA admin UI
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/App.tsx src/types.ts src/lib/scoring.ts src/lib/tournament.ts supabase/setup.sql
           if git diff --cached --quiet; then
-            echo "Keine Änderungen notwendig."
+            echo "KDA-Gewichtung ist bereits vollständig eingebaut."
             exit 0
           fi
-          git commit -m "Add configurable KDA scoring weights"
+          git commit -m "Add KDA weighting admin controls"
           git push origin HEAD:main

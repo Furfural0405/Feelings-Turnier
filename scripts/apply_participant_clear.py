@@ -15,7 +15,6 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 def main() -> None:
     s = APP.read_text(encoding='utf-8')
 
-    # Busy-State für den Löschvorgang.
     s = replace_once(
         s,
         "  const [backgroundUploadBusy, setBackgroundUploadBusy] = useState(false)\n",
@@ -23,7 +22,6 @@ def main() -> None:
         'clearingParticipants state',
     )
 
-    # Funktion direkt hinter der bestehenden Einzel-Löschfunktion ergänzen.
     marker = """  function setGroupRoundCount(rawCount: number) {
 """
     function_block = """  async function removeAllParticipants() {
@@ -93,7 +91,6 @@ def main() -> None:
             raise RuntimeError('Patch-Stelle nicht gefunden: removeAllParticipants')
         s = s.replace(marker, function_block + marker, 1)
 
-    # Admin-Toolbar um sicheren Komplett-Löschbutton erweitern.
     old_toolbar = """            <div className=\"admin-toolbar\"><button className=\"button button--ghost\" onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button></div>
 """
     new_toolbar = """            <div className=\"admin-toolbar\">

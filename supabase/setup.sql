@@ -295,3 +295,14 @@ $$;
 
 revoke all on function public.check_registration_rate_limit(text, text) from public, anon, authenticated;
 grant execute on function public.check_registration_rate_limit(text, text) to service_role;
+
+
+-- Globale KDA-Gewichtung. In der produktiven Datenbank bereits angewendet.
+alter table public.site_settings
+  add column if not exists scoring jsonb not null default jsonb_build_object(
+    'kill', 1,
+    'assist', 1,
+    'death', 1.5,
+    'positiveBonus', 3,
+    'negativePenalty', 3
+  );

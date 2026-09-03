@@ -12,6 +12,7 @@ import {
 } from './lib/tournament'
 import {
   calculateRoundScore,
+  DEFAULT_SCORING_WEIGHTS,
   emptyParticipantStats,
   formatPoints,
   normalizeParticipantStats,
@@ -26,6 +27,7 @@ import type {
   ParticipantStats,
   QualificationPlan,
   RoundStats,
+  ScoringWeights,
   SiteBackgroundSettings,
   StoredTournamentState,
   TournamentState,
@@ -81,6 +83,8 @@ const DEFAULT_HERO: HeroContent = {
   lead: 'Drei KDA-Runden. Automatische Gruppen. Eine globale K.O.-Stage. Ein Champion.',
   tags: ['VALORANT VIBES', 'STREAM MODE', 'KDA TRACKING'],
 }
+
+const DEFAULT_SCORING: ScoringWeights = DEFAULT_SCORING_WEIGHTS
 
 const DEFAULT_BACKGROUND: SiteBackgroundSettings = {
   enabled: false,
@@ -143,6 +147,22 @@ function normalizeBackground(value: unknown): SiteBackgroundSettings {
   }
 }
 
+function normalizeScoring(value: unknown): ScoringWeights {
+  const candidate = value && typeof value === 'object' ? value as Partial<ScoringWeights> : {}
+  const safeWeight = (rawValue: unknown, fallback: number) => {
+    const parsed = Number(rawValue)
+    if (!Number.isFinite(parsed)) return fallback
+    return Math.round(Math.max(0, Math.min(20, parsed)) * 10) / 10
+  }
+  return {
+    kill: safeWeight(candidate.kill, DEFAULT_SCORING.kill),
+    assist: safeWeight(candidate.assist, DEFAULT_SCORING.assist),
+    death: safeWeight(candidate.death, DEFAULT_SCORING.death),
+    positiveBonus: safeWeight(candidate.positiveBonus, DEFAULT_SCORING.positiveBonus),
+    negativePenalty: safeWeight(candidate.negativePenalty, DEFAULT_SCORING.negativePenalty),
+  }
+}
+
 function normalizeBracket(bracket: KnockoutBracket | null | undefined): KnockoutBracket | null {
   if (!bracket || !Array.isArray(bracket.rounds)) return null
   return {
@@ -177,6 +197,7 @@ function App() {
   const [state, setState] = useState<TournamentState>(DEFAULT_STATE)
   const [hero, setHero] = useState<HeroContent>(DEFAULT_HERO)
   const [background, setBackground] = useState<SiteBackgroundSettings>(DEFAULT_BACKGROUND)
+  const [scoringWeights, setScoringWeights] = useState<ScoringWeights>(DEFAULT_SCORING)
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<AccessProfile | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -190,7 +211,7 @@ function App() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'header' | 'background' | 'group'>('header')
+  const [settingsTab, setSettingsTab] = useState<'header' | 'background' | 'scoring' | 'group'>('header')
   const [siteSaving, setSiteSaving] = useState(false)
   const [backgroundUploadBusy, setBackgroundUploadBusy] = useState(false)
   const [removingProfileId, setRemovingProfileId] = useState<string | null>(null)
@@ -364,11 +385,12 @@ function App() {
     if (!supabase) return
     let cancelled = false
     async function loadSiteSettings() {
-      const { data, error } = await supabase!.from('site_settings').select('hero,background').eq('id', 1).maybeSingle()
+      const { data, error } = await supabase!.from('site_settings').select('hero,background,scoring').eq('id', 1).maybeSingle()
       if (cancelled) return
       if (!error) {
         if (data?.hero) setHero(normalizeHero(data.hero))
         setBackground(normalizeBackground(data?.background))
+        setScoringWeights(normalizeScoring(data?.scoring))
       }
     }
     void loadSiteSettings()
@@ -535,6 +557,21 @@ function App() {
     setBackground(cleaned)
     setNotice(successMessage)
     return true
+  }
+
+  async function saveScoringSettings() {
+    if (!supabase || !isAdmin || !user) return
+    const cleaned = normalizeScoring(scoringWeights)
+    setScoringWeights(cleaned)
+    setSiteSaving(true)
+    const { error } = await supabase
+      .from('site_settings')
+      .update({ scoring: cleaned, updated_at: new Date().toISOString(), updated_by: user.id })
+      .eq('id', 1)
+    setSiteSaving(false)
+    setNotice(error
+      ? `KDA-Gewichtung konnte nicht gespeichert werden: ${error.message}`
+      : 'KDA-Gewichtung wurde veröffentlicht und wird jetzt in Gruppen- und K.O.-Phase verwendet.')
   }
 
   async function uploadSiteBackground(file: File | null) {
@@ -712,7 +749,7 @@ function App() {
       setNotice('Für die aktuelle Konfiguration kann noch keine K.O.-Phase erstellt werden.')
       return
     }
-    const bracket = createGlobalKnockoutBracket(state.groups, state.participants, state.stats, activePlan.qualifiersPerGroup)
+    const bracket = createGlobalKnockoutBracket(state.groups, state.participants, state.stats, activePlan.qualifiersPerGroup, scoringWeights)
     if (bracket.qualifierIds.length !== activePlan.knockoutSize || bracket.rounds.length === 0) {
       setNotice('K.O.-Phase konnte nicht gesetzt werden. Bitte Gruppen neu auslosen.')
       return
@@ -1045,7 +1082,11 @@ function App() {
         <section className="panel scoring-panel">
           <div className="section-heading"><div><span className="step">02</span><h2>KDA-Wertung</h2></div></div>
           <div className="score-rules">
-            <div className="rule"><strong>+1</strong><span>Kill</span></div><div className="rule"><strong>+1</strong><span>Assist</span></div><div className="rule rule--negative"><strong>−1,5</strong><span>Death</span></div><div className="rule"><strong>+3</strong><span>K + A &gt; D</span></div><div className="rule rule--negative"><strong>−3</strong><span>K + A &lt; D</span></div>
+            <div className="rule"><strong>+{formatPoints(scoringWeights.kill)}</strong><span>Kill</span></div>
+            <div className="rule"><strong>+{formatPoints(scoringWeights.assist)}</strong><span>Assist</span></div>
+            <div className="rule rule--negative"><strong>−{formatPoints(scoringWeights.death)}</strong><span>Death</span></div>
+            <div className="rule"><strong>+{formatPoints(scoringWeights.positiveBonus)}</strong><span>K + A &gt; D</span></div>
+            <div className="rule rule--negative"><strong>−{formatPoints(scoringWeights.negativePenalty)}</strong><span>K + A &lt; D</span></div>
           </div>
         </section>
 
@@ -1058,6 +1099,7 @@ function App() {
               <div className="settings-tabs" role="tablist" aria-label="Admin Einstellungen">
                 <button className={settingsTab === 'header' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('header')}>Header-Inhalte</button>
                 <button className={settingsTab === 'background' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('background')}>Website-Hintergrund</button>
+                <button className={settingsTab === 'scoring' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('scoring')}>KDA-Gewichtung</button>
                 <button className={settingsTab === 'group' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('group')}>Gruppenphase</button>
               </div>
 
@@ -1109,6 +1151,27 @@ function App() {
                     <button className="button button--ghost" disabled={siteSaving || backgroundUploadBusy} onClick={() => setBackground(DEFAULT_BACKGROUND)}>Einstellungen auf Standard setzen</button>
                   </div>
                 </div>
+              ) : settingsTab === 'scoring' ? (
+                <div className="settings-content">
+                  <p className="muted">Passe die Punktegewichtung global an. Die Werte gelten für die Ranglisten der Gruppenphase und für alle KDA-Punkte in der K.O.-Phase.</p>
+                  <div className="settings-form-grid">
+                    <label>Punkte pro Kill<input className="text-input" type="number" min="0" max="20" step="0.1" value={scoringWeights.kill} onChange={(event) => setScoringWeights((current) => ({ ...current, kill: Number(event.target.value || 0) }))} /></label>
+                    <label>Punkte pro Assist<input className="text-input" type="number" min="0" max="20" step="0.1" value={scoringWeights.assist} onChange={(event) => setScoringWeights((current) => ({ ...current, assist: Number(event.target.value || 0) }))} /></label>
+                    <label>Abzug pro Death<input className="text-input" type="number" min="0" max="20" step="0.1" value={scoringWeights.death} onChange={(event) => setScoringWeights((current) => ({ ...current, death: Number(event.target.value || 0) }))} /></label>
+                    <label>Bonus bei positiver Runde<input className="text-input" type="number" min="0" max="20" step="0.1" value={scoringWeights.positiveBonus} onChange={(event) => setScoringWeights((current) => ({ ...current, positiveBonus: Number(event.target.value || 0) }))} /></label>
+                    <label>Abzug bei negativer Runde<input className="text-input" type="number" min="0" max="20" step="0.1" value={scoringWeights.negativePenalty} onChange={(event) => setScoringWeights((current) => ({ ...current, negativePenalty: Number(event.target.value || 0) }))} /></label>
+                  </div>
+                  <div className="plan-card">
+                    <span>FORMEL</span>
+                    <strong>K × {formatPoints(scoringWeights.kill)} + A × {formatPoints(scoringWeights.assist)} − D × {formatPoints(scoringWeights.death)}</strong>
+                    <em>Rundensaldo: +{formatPoints(scoringWeights.positiveBonus)} bei K+A&gt;D · −{formatPoints(scoringWeights.negativePenalty)} bei K+A&lt;D</em>
+                  </div>
+                  <p className="settings-warning">Die Einordnung „positive/negative Runde“ basiert weiterhin auf den echten Werten Kills + Assists im Vergleich zu Deaths. Wenn eine K.O.-Phase bereits erzeugt wurde und sich durch neue Gewichte die Gruppenrangliste ändert, setze die K.O.-Phase anschließend neu, damit die Qualifikanten neu bestimmt werden.</p>
+                  <div className="admin-tools__actions">
+                    <button className="button button--twitch" disabled={siteSaving} onClick={() => void saveScoringSettings()}>{siteSaving ? 'Wird gespeichert …' : 'KDA-Gewichtung veröffentlichen'}</button>
+                    <button className="button button--ghost" disabled={siteSaving} onClick={() => setScoringWeights({ ...DEFAULT_SCORING })}>Standardwerte laden</button>
+                  </div>
+                </div>
               ) : (
                 <div className="settings-content">
                   <p className="muted">Lege fest, aus wie vielen KDA-Runden die Gruppenphase besteht. Erlaubt sind 1 bis 7 Runden.</p>
@@ -1135,7 +1198,7 @@ function App() {
             </section>
 
             {state.groups.map((group) => {
-              const standings = buildStandings(group, state.participants, state.stats)
+              const standings = buildStandings(group, state.participants, state.stats, scoringWeights)
               const qualified = activePlan?.qualifiersPerGroup ?? 0
               return <section className="panel group-panel" key={group.id}>
                 <div className="section-heading"><div><span className="step">{group.name}</span><h2>{group.participantIds.length} Spieler</h2></div></div>
@@ -1144,12 +1207,12 @@ function App() {
                   <thead><tr><th>Spieler</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>S{round} K</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>Gesamt</th></tr></thead>
                   <tbody>{group.participantIds.map((participantId) => {
                     const participantStats = normalizeParticipantStats(state.stats[participantId], state.groupRoundCount)
-                    const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round), 0)
+                    const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)
                     return <tr key={participantId}><th className="player-cell">{participantMap.get(participantId)?.name ?? 'Unbekannt'}</th>{participantStats.rounds.flatMap((round, roundIndex) => [
                       <td key={`${roundIndex}k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,
                       <td key={`${roundIndex}a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,
                       <td key={`${roundIndex}d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,
-                      <td className={calculateRoundScore(round) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round))}</td>,
+                      <td className={calculateRoundScore(round, scoringWeights) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round, scoringWeights))}</td>,
                     ])}<td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td></tr>
                   })}</tbody>
                 </table></div>
@@ -1170,6 +1233,7 @@ function App() {
                   roundIndex={roundIndex}
                   matchIndex={matchIndex}
                   participantMap={participantMap}
+                  scoringWeights={scoringWeights}
                   onRoundCount={updateKoRoundCount}
                   onStat={updateKoStat}
                   onWinner={selectWinner}
@@ -1222,6 +1286,7 @@ function KnockoutMatchCard({
   roundIndex,
   matchIndex,
   participantMap,
+  scoringWeights,
   onRoundCount,
   onStat,
   onWinner,
@@ -1230,6 +1295,7 @@ function KnockoutMatchCard({
   roundIndex: number
   matchIndex: number
   participantMap: Map<string, Participant>
+  scoringWeights: ScoringWeights
   onRoundCount: (roundIndex: number, matchIndex: number, count: number) => void
   onStat: (roundIndex: number, matchIndex: number, participantId: string, kdaRoundIndex: number, field: keyof RoundStats, value: string) => void
   onWinner: (roundIndex: number, matchIndex: number, winnerId: string) => void
@@ -1243,7 +1309,7 @@ function KnockoutMatchCard({
       const playerName = participantId ? participantMap.get(participantId)?.name ?? 'Unbekannt' : 'TBD'
       if (!participantId) return <div className="ko-player-block ko-player-block--empty" key={`empty-${playerIndex}`}><strong>{playerName}</strong><span>Wartet auf vorheriges Match</span></div>
       const participantStats = normalizeParticipantStats(match.stats?.[participantId], match.kdaRoundCount || 1)
-      const total = participantStats.rounds.reduce((sum, roundStats) => sum + calculateRoundScore(roundStats), 0)
+      const total = participantStats.rounds.reduce((sum, roundStats) => sum + calculateRoundScore(roundStats, scoringWeights), 0)
       return <div className={match.winnerId === participantId ? 'ko-player-block ko-player-block--winner' : 'ko-player-block'} key={participantId}>
         <div className="ko-player-title"><strong>{playerName}</strong><span className={total < 0 ? 'points points--negative' : 'points'}>{formatPoints(total)} Pkt.</span></div>
         <div className="ko-kda-rounds">{participantStats.rounds.map((roundStats, kdaRoundIndex) => <div className="ko-kda-row" key={kdaRoundIndex}>
@@ -1251,7 +1317,7 @@ function KnockoutMatchCard({
           <label>K<StatInput value={roundStats.kills} onChange={(value) => onStat(roundIndex, matchIndex, participantId, kdaRoundIndex, 'kills', value)} /></label>
           <label>A<StatInput value={roundStats.assists} onChange={(value) => onStat(roundIndex, matchIndex, participantId, kdaRoundIndex, 'assists', value)} /></label>
           <label>D<StatInput value={roundStats.deaths} onChange={(value) => onStat(roundIndex, matchIndex, participantId, kdaRoundIndex, 'deaths', value)} /></label>
-          <span className={calculateRoundScore(roundStats) < 0 ? 'ko-round-points points--negative' : 'ko-round-points'}>{formatPoints(calculateRoundScore(roundStats))}</span>
+          <span className={calculateRoundScore(roundStats, scoringWeights) < 0 ? 'ko-round-points points--negative' : 'ko-round-points'}>{formatPoints(calculateRoundScore(roundStats, scoringWeights))}</span>
         </div>)}</div>
       </div>
     })}

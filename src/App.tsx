@@ -30,6 +30,28 @@ import type {
   TournamentState,
 } from './types'
 
+
+type TwitchLiveState = 'checking' | 'live' | 'offline' | 'unavailable'
+
+type TwitchPlayerInstance = {
+  addEventListener: (event: string, callback: () => void) => void
+  setMuted: (muted: boolean) => void
+}
+
+type TwitchPlayerConstructor = {
+  new (elementId: string, options: Record<string, unknown>): TwitchPlayerInstance
+  ONLINE: string
+  OFFLINE: string
+  READY: string
+}
+
+type TwitchWindow = Window & {
+  Twitch?: { Player: TwitchPlayerConstructor }
+}
+
+const TWITCH_EMBED_SCRIPT_ID = 'twitch-embed-sdk'
+const TWITCH_PLAYER_HOST_ID = 'brume-twitch-player'
+
 const DEFAULT_HERO: HeroContent = {
   titleLine1: 'FEELINGS',
   titleLine2: 'TURNIER',
@@ -111,6 +133,8 @@ function App() {
   const [settingsTab, setSettingsTab] = useState<'header' | 'group'>('header')
   const [siteSaving, setSiteSaving] = useState(false)
   const [removingProfileId, setRemovingProfileId] = useState<string | null>(null)
+  const [twitchLiveState, setTwitchLiveState] = useState<TwitchLiveState>('checking')
+  const twitchPlayerRef = useRef<HTMLDivElement>(null)
   const importRef = useRef<HTMLInputElement>(null)
   const saveTimer = useRef<number | null>(null)
 
@@ -131,8 +155,93 @@ function App() {
     [previewPlan, state.groups.length, state.participants.length],
   )
   const championId = state.knockoutBracket?.rounds.at(-1)?.[0]?.winnerId ?? null
-  const twitchParent = typeof window === 'undefined' ? 'furfural0405.github.io' : window.location.hostname
-  const twitchEmbedUrl = `https://player.twitch.tv/?channel=brumefeelings&parent=${encodeURIComponent(twitchParent)}&autoplay=true&muted=true`
+  const twitchStatusLabel = twitchLiveState === 'live'
+    ? 'LIVE'
+    : twitchLiveState === 'offline'
+      ? 'OFFLINE'
+      : twitchLiveState === 'unavailable'
+        ? 'STATUS NICHT VERFÜGBAR'
+        : 'LIVE-STATUS WIRD GEPRÜFT'
+
+  useEffect(() => {
+    let disposed = false
+    let statusTimeout: number | null = null
+
+    const fail = () => {
+      if (!disposed) setTwitchLiveState('unavailable')
+    }
+
+    const initializePlayer = () => {
+      if (disposed || !twitchPlayerRef.current) return
+      const twitch = (window as TwitchWindow).Twitch
+      if (!twitch?.Player) {
+        fail()
+        return
+      }
+
+      twitchPlayerRef.current.innerHTML = ''
+      setTwitchLiveState('checking')
+
+      try {
+        const player = new twitch.Player(TWITCH_PLAYER_HOST_ID, {
+          width: '100%',
+          height: '100%',
+          channel: 'brumefeelings',
+          parent: [window.location.hostname],
+          autoplay: true,
+          muted: true,
+        })
+
+        const setLive = () => {
+          if (disposed) return
+          if (statusTimeout !== null) window.clearTimeout(statusTimeout)
+          setTwitchLiveState('live')
+        }
+        const setOffline = () => {
+          if (disposed) return
+          if (statusTimeout !== null) window.clearTimeout(statusTimeout)
+          setTwitchLiveState('offline')
+        }
+
+        player.addEventListener(twitch.Player.ONLINE, setLive)
+        player.addEventListener(twitch.Player.OFFLINE, setOffline)
+        player.addEventListener(twitch.Player.READY, () => {
+          if (!disposed) player.setMuted(true)
+        })
+
+        statusTimeout = window.setTimeout(() => {
+          if (!disposed) setTwitchLiveState((current) => current === 'checking' ? 'unavailable' : current)
+        }, 12000)
+      } catch {
+        fail()
+      }
+    }
+
+    const existingScript = document.getElementById(TWITCH_EMBED_SCRIPT_ID) as HTMLScriptElement | null
+    if ((window as TwitchWindow).Twitch?.Player) {
+      initializePlayer()
+    } else if (existingScript) {
+      existingScript.addEventListener('load', initializePlayer)
+      existingScript.addEventListener('error', fail)
+    } else {
+      const script = document.createElement('script')
+      script.id = TWITCH_EMBED_SCRIPT_ID
+      script.src = 'https://player.twitch.tv/js/embed/v1.js'
+      script.async = true
+      script.addEventListener('load', initializePlayer)
+      script.addEventListener('error', fail)
+      document.head.appendChild(script)
+    }
+
+    return () => {
+      disposed = true
+      if (statusTimeout !== null) window.clearTimeout(statusTimeout)
+      const script = document.getElementById(TWITCH_EMBED_SCRIPT_ID)
+      script?.removeEventListener('load', initializePlayer)
+      script?.removeEventListener('error', fail)
+      if (twitchPlayerRef.current) twitchPlayerRef.current.innerHTML = ''
+    }
+  }, [])
 
   useEffect(() => {
     if (!notice) return
@@ -670,20 +779,25 @@ function App() {
             <div className="hero__tags">{hero.tags.map((tag, index) => <span key={`${tag}-${index}`}>{tag}</span>)}</div>
           </div>
 
-          <a className="stream-card stream-card--live" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer" aria-label="Livestream von brumefeelings auf Twitch in neuem Tab öffnen">
-            <div className="stream-card__bar"><span className="live-dot" /> LIVE STREAM <span>brumefeelings ↗</span></div>
-            <div className="stream-card__screen stream-card__screen--embed">
-              <iframe
-                className="twitch-embed"
-                src={twitchEmbedUrl}
-                title="Twitch Livestream brumefeelings"
-                allow="autoplay; fullscreen"
-                loading="lazy"
-                tabIndex={-1}
-              />
-              <span className="twitch-open-hint">Auf Twitch öffnen ↗</span>
+          <div className={`stream-card stream-card--twitch stream-card--${twitchLiveState}`}>
+            <div className="stream-card__bar">
+              <span className={`live-dot live-dot--${twitchLiveState}`} />
+              <span className="stream-status" aria-live="polite">{twitchStatusLabel}</span>
+              <a className="stream-card__channel-link" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">brumefeelings ↗</a>
             </div>
-          </a>
+            <div className="stream-card__screen stream-card__screen--embed">
+              <div
+                id={TWITCH_PLAYER_HOST_ID}
+                ref={twitchPlayerRef}
+                className="twitch-embed"
+                aria-label="Twitch Livestream brumefeelings"
+              />
+            </div>
+            <div className="stream-card__actions">
+              <span>{twitchLiveState === 'live' ? 'BrumeFeelings streamt gerade live.' : twitchLiveState === 'offline' ? 'Der Kanal ist aktuell offline.' : twitchLiveState === 'unavailable' ? 'Der Live-Status konnte gerade nicht geladen werden.' : 'Twitch-Status wird geladen.'}</span>
+              <a className="twitch-open-button" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">Auf Twitch öffnen ↗</a>
+            </div>
+          </div>
         </div>
       </header>
 

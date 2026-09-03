@@ -1,4 +1,4 @@
-FEELINGS-TURNIER · SUPABASE-ONLY REGISTRIERUNG + ABGELEHNTE ANFRAGEN AUFRÄUMEN
+FEELINGS-TURNIER · TWITCH LIVE-STATUS + BEDIENBARER MINI-PLAYER
 ================================================================================
 
 Was bereits LIVE in Supabase erledigt wurde:
@@ -44,3 +44,23 @@ Empfohlener Test nach GitHub-Pages-Deployment:
 4. "Endgültig entfernen" drücken und Sicherheitsabfrage bestätigen.
 5. Prüfen, dass die Zeile aus der Liste verschwindet.
 6. Optional dieselbe Test-Mailadresse erneut registrieren; sie sollte wieder als neue pending-Anfrage erscheinen.
+
+
+NEU · Twitch im Header
+----------------------
+- Der Twitch-Player im Header ist jetzt direkt auf der Webseite bedienbar.
+- Play/Pause, Lautstärke und Vollbild laufen über den offiziellen interaktiven Twitch Player.
+- Der Header erkennt über die offiziellen Player-Events ONLINE/OFFLINE, ob brumefeelings gerade live ist.
+- Bei LIVE erscheint ein roter pulsierender Punkt und der Text LIVE.
+- Bei OFFLINE erscheint ein grauer Punkt und OFFLINE.
+- Während des Ladens wird LIVE-STATUS WIRD GEPRÜFT angezeigt.
+- Falls Twitch den Status nicht liefern kann, wird STATUS NICHT VERFÜGBAR angezeigt.
+- Der Player selbst ist nicht mehr komplett als Link überlagert; dadurch bleiben seine Bedienelemente klickbar.
+- Über „Auf Twitch öffnen ↗“ bzw. den Kanalnamen kann jederzeit Twitch in einem neuen Tab geöffnet werden.
+- Es ist KEIN Twitch Client Secret und KEIN Twitch API Token nötig.
+
+Für diese Twitch-Änderung müssen in GitHub mindestens ersetzt werden:
+- src/App.tsx
+- src/styles.css
+
+Supabase muss für die Twitch-Funktion NICHT verändert werden.

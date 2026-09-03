@@ -214,6 +214,7 @@ function App() {
   const [settingsTab, setSettingsTab] = useState<'header' | 'background' | 'scoring' | 'group'>('header')
   const [siteSaving, setSiteSaving] = useState(false)
   const [backgroundUploadBusy, setBackgroundUploadBusy] = useState(false)
+  const [clearingParticipants, setClearingParticipants] = useState(false)
   const [removingProfileId, setRemovingProfileId] = useState<string | null>(null)
   const [twitchLiveState, setTwitchLiveState] = useState<TwitchLiveState>('checking')
   const [twitchQualities, setTwitchQualities] = useState<Partial<Record<TwitchQualityKey, string>>>({})
@@ -701,6 +702,67 @@ function App() {
     })
   }
 
+  async function removeAllParticipants() {
+    if (!supabase || !isAdmin || !user) return
+
+    const participantCount = state.participants.length
+    if (participantCount === 0) {
+      setNotice('Es sind aktuell keine Teilnehmer eingetragen.')
+      return
+    }
+
+    const confirmed = window.confirm(
+      `Wirklich alle ${participantCount} Teilnehmer gleichzeitig löschen?\n\nDabei werden auch Gruppen, KDA-Werte und die K.O.-Phase zurückgesetzt. Diese Aktion kann nicht rückgängig gemacht werden.`,
+    )
+    if (!confirmed) return
+
+    setClearingParticipants(true)
+    if (saveTimer.current) {
+      window.clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+
+    const { error: deleteError } = await supabase
+      .from('participants')
+      .delete()
+      .not('id', 'is', null)
+
+    if (deleteError) {
+      setClearingParticipants(false)
+      setNotice(`Teilnehmer konnten nicht gelöscht werden: ${deleteError.message}`)
+      return
+    }
+
+    const clearedState: TournamentState = {
+      ...state,
+      participants: [],
+      groups: [],
+      stats: {},
+      knockoutBracket: null,
+    }
+
+    const { error: stateError } = await supabase
+      .from('tournament_state')
+      .upsert({
+        id: 1,
+        payload: storedState(clearedState),
+        updated_at: new Date().toISOString(),
+        updated_by: user.id,
+      }, { onConflict: 'id' })
+
+    setState(clearedState)
+    setNewName('')
+    setBulkNames('')
+    setClearingParticipants(false)
+
+    if (stateError) {
+      setNotice(`Alle Teilnehmer wurden gelöscht. Der Turnierstand konnte jedoch nicht vollständig gespeichert werden: ${stateError.message}`)
+      return
+    }
+
+    setNotice(`${participantCount} Teilnehmer wurden gelöscht. Gruppen, KDA-Daten und K.O.-Phase wurden zurückgesetzt.`)
+  }
+
   function setGroupRoundCount(rawCount: number) {
     if (!isAdmin) return
     const groupRoundCount = clamp(rawCount, 1, 7)
@@ -1074,7 +1136,12 @@ function App() {
           </div>
           {isAdmin && <>
             <details className="bulk-add"><summary>Mehrere Teilnehmer hinzufügen</summary><textarea className="text-area" value={bulkNames} onChange={(event) => setBulkNames(event.target.value)} placeholder="Eine Person pro Zeile" /><button className="button button--secondary" onClick={() => void addBulkParticipants()}>Liste übernehmen</button></details>
-            <div className="admin-toolbar"><button className="button button--ghost" onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button></div>
+            <div className="admin-toolbar">
+              <div className="admin-tools__actions">
+                <button className="button button--ghost" disabled={clearingParticipants} onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button>
+                <button className="button button--danger" disabled={clearingParticipants || state.participants.length === 0} onClick={() => void removeAllParticipants()}>{clearingParticipants ? 'Wird gelöscht …' : 'Alle Teilnehmer löschen'}</button>
+              </div>
+            </div>
             <div className="chips">{state.participants.map((participant, index) => <div className="chip" key={participant.id}><span className="chip__index">{index + 1}</span><span>{participant.name}</span><button className="chip__remove" onClick={() => void removeParticipant(participant.id)} aria-label={`${participant.name} entfernen`}>×</button></div>)}</div>
           </>}
         </section>

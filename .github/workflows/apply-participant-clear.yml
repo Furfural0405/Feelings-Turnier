@@ -1,0 +1,78 @@
+name: Apply participant clear admin feature
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/apply-participant-clear.yml'
+      - 'scripts/apply_participant_clear.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  patch-build-deploy:
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    env:
+      VITE_SUPABASE_URL: https://rwmzxgnbndoeioqksnyn.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_REhjSoFql5jeIPjI3mBwmw_zCjDuSAv
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Apply participant clear patch
+        run: python scripts/apply_participant_clear.py
+
+      - name: Commit patched App
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx
+          if git diff --cached --quiet; then
+            echo "Funktion ist bereits eingebaut."
+          else
+            git commit -m "Add clear all participants admin action"
+            git push origin HEAD:main
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build website
+        run: npm run build
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload built website
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

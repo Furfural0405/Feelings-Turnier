@@ -157,11 +157,26 @@ create table if not exists public.site_settings (
     'lead', 'Drei KDA-Runden. Automatische Gruppen. Eine globale K.O.-Stage. Ein Champion.',
     'tags', jsonb_build_array('VALORANT VIBES', 'STREAM MODE', 'KDA TRACKING')
   ),
+  background jsonb not null default jsonb_build_object(
+    'enabled', false,
+    'url', '',
+    'path', '',
+    'fit', 'cover',
+    'position', 'center top',
+    'repeat', 'no-repeat',
+    'opacity', 42,
+    'hideDefaultFloral', false
+  ),
   updated_at timestamptz not null default now(),
   updated_by uuid null references auth.users(id) on delete set null
 );
 
 insert into public.site_settings (id) values (1) on conflict (id) do nothing;
+alter table public.site_settings
+  add column if not exists background jsonb not null default '{"enabled":false,"url":"","path":"","fit":"cover","position":"center top","repeat":"no-repeat","opacity":42,"hideDefaultFloral":false}'::jsonb;
+update public.site_settings
+set background = coalesce(background, '{}'::jsonb) || jsonb_build_object('repeat', coalesce(background->>'repeat', 'no-repeat'))
+where id = 1;
 alter table public.site_settings enable row level security;
 revoke all on table public.site_settings from anon, authenticated;
 grant select on table public.site_settings to anon, authenticated;
@@ -173,6 +188,55 @@ drop policy if exists "admin update site settings" on public.site_settings;
 create policy "public read site settings" on public.site_settings for select to anon, authenticated using (id = 1);
 create policy "admin insert site settings" on public.site_settings for insert to authenticated with check ((select private.is_approved_admin()) and id = 1);
 create policy "admin update site settings" on public.site_settings for update to authenticated using ((select private.is_approved_admin())) with check ((select private.is_approved_admin()) and id = 1);
+
+-- Öffentliche Website-Bilder. Lesen ist über den Public Bucket möglich; Änderungen nur für freigeschaltete Admins.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('site-assets', 'site-assets', true, 10485760, array['image/png','image/jpeg','image/webp'])
+on conflict (id) do update
+set public = excluded.public,
+    file_size_limit = excluded.file_size_limit,
+    allowed_mime_types = excluded.allowed_mime_types;
+
+drop policy if exists "approved admins upload site backgrounds" on storage.objects;
+drop policy if exists "approved admins read site backgrounds" on storage.objects;
+drop policy if exists "approved admins update site backgrounds" on storage.objects;
+drop policy if exists "approved admins delete site backgrounds" on storage.objects;
+
+create policy "approved admins upload site backgrounds" on storage.objects
+for insert to authenticated
+with check (
+  bucket_id = 'site-assets'
+  and (storage.foldername(name))[1] = 'backgrounds'
+  and lower(storage.extension(name)) = any (array['png','jpg','jpeg','webp'])
+  and (select private.is_approved_admin())
+);
+create policy "approved admins read site backgrounds" on storage.objects
+for select to authenticated
+using (
+  bucket_id = 'site-assets'
+  and (storage.foldername(name))[1] = 'backgrounds'
+  and (select private.is_approved_admin())
+);
+create policy "approved admins update site backgrounds" on storage.objects
+for update to authenticated
+using (
+  bucket_id = 'site-assets'
+  and (storage.foldername(name))[1] = 'backgrounds'
+  and (select private.is_approved_admin())
+)
+with check (
+  bucket_id = 'site-assets'
+  and (storage.foldername(name))[1] = 'backgrounds'
+  and lower(storage.extension(name)) = any (array['png','jpg','jpeg','webp'])
+  and (select private.is_approved_admin())
+);
+create policy "approved admins delete site backgrounds" on storage.objects
+for delete to authenticated
+using (
+  bucket_id = 'site-assets'
+  and (storage.foldername(name))[1] = 'backgrounds'
+  and (select private.is_approved_admin())
+);
 
 -- Supabase-only Registrierung ohne Signup-Bestätigungsmail.
 -- Die öffentliche Edge Function ruft diese Rate-Limit-Funktion ausschließlich mit service_role auf.

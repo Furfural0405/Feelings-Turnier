@@ -68,6 +68,18 @@ export type HeroContent = {
   tags: string[]
 }
 
+
+export type SiteBackgroundSettings = {
+  enabled: boolean
+  url: string
+  path: string
+  fit: 'cover' | 'contain'
+  position: 'center top' | 'center center' | 'left top' | 'right top'
+  repeat: 'no-repeat' | 'repeat' | 'repeat-y'
+  opacity: number
+  hideDefaultFloral: boolean
+}
+
 export type TournamentState = {
   participants: Participant[]
   groupCount: number

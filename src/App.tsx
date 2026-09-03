@@ -26,6 +26,7 @@ import type {
   ParticipantStats,
   QualificationPlan,
   RoundStats,
+  SiteBackgroundSettings,
   StoredTournamentState,
   TournamentState,
 } from './types'
@@ -81,6 +82,21 @@ const DEFAULT_HERO: HeroContent = {
   tags: ['VALORANT VIBES', 'STREAM MODE', 'KDA TRACKING'],
 }
 
+const DEFAULT_BACKGROUND: SiteBackgroundSettings = {
+  enabled: false,
+  url: '',
+  path: '',
+  fit: 'cover',
+  position: 'center top',
+  repeat: 'no-repeat',
+  opacity: 42,
+  hideDefaultFloral: false,
+}
+
+const SITE_BACKGROUND_BUCKET = 'site-assets'
+const SITE_BACKGROUND_MAX_BYTES = 10 * 1024 * 1024
+const SITE_BACKGROUND_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp'])
+
 const DEFAULT_STATE: TournamentState = {
   participants: [],
   groupCount: 2,
@@ -103,6 +119,27 @@ function normalizeHero(value: unknown): HeroContent {
     titleLine2: typeof candidate.titleLine2 === 'string' && candidate.titleLine2.trim() ? candidate.titleLine2 : DEFAULT_HERO.titleLine2,
     lead: typeof candidate.lead === 'string' && candidate.lead.trim() ? candidate.lead : DEFAULT_HERO.lead,
     tags,
+  }
+}
+
+function normalizeBackground(value: unknown): SiteBackgroundSettings {
+  const candidate = value && typeof value === 'object' ? value as Partial<SiteBackgroundSettings> : {}
+  const fit = candidate.fit === 'contain' ? 'contain' : 'cover'
+  const position = ['center top', 'center center', 'left top', 'right top'].includes(String(candidate.position))
+    ? candidate.position as SiteBackgroundSettings['position']
+    : DEFAULT_BACKGROUND.position
+  const repeat = ['no-repeat', 'repeat', 'repeat-y'].includes(String(candidate.repeat))
+    ? candidate.repeat as SiteBackgroundSettings['repeat']
+    : DEFAULT_BACKGROUND.repeat
+  return {
+    enabled: Boolean(candidate.enabled),
+    url: typeof candidate.url === 'string' ? candidate.url : '',
+    path: typeof candidate.path === 'string' ? candidate.path : '',
+    fit,
+    position,
+    repeat,
+    opacity: clamp(Number(candidate.opacity) || DEFAULT_BACKGROUND.opacity, 10, 100),
+    hideDefaultFloral: Boolean(candidate.hideDefaultFloral),
   }
 }
 
@@ -139,6 +176,7 @@ function storedState(state: TournamentState): StoredTournamentState {
 function App() {
   const [state, setState] = useState<TournamentState>(DEFAULT_STATE)
   const [hero, setHero] = useState<HeroContent>(DEFAULT_HERO)
+  const [background, setBackground] = useState<SiteBackgroundSettings>(DEFAULT_BACKGROUND)
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<AccessProfile | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -152,8 +190,9 @@ function App() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'header' | 'group'>('header')
+  const [settingsTab, setSettingsTab] = useState<'header' | 'background' | 'group'>('header')
   const [siteSaving, setSiteSaving] = useState(false)
+  const [backgroundUploadBusy, setBackgroundUploadBusy] = useState(false)
   const [removingProfileId, setRemovingProfileId] = useState<string | null>(null)
   const [twitchLiveState, setTwitchLiveState] = useState<TwitchLiveState>('checking')
   const [twitchQualities, setTwitchQualities] = useState<Partial<Record<TwitchQualityKey, string>>>({})
@@ -161,6 +200,7 @@ function App() {
   const twitchPlayerRef = useRef<HTMLDivElement>(null)
   const twitchPlayerInstanceRef = useRef<TwitchPlayerInstance | null>(null)
   const importRef = useRef<HTMLInputElement>(null)
+  const backgroundInputRef = useRef<HTMLInputElement>(null)
   const saveTimer = useRef<number | null>(null)
 
   const isAdmin = Boolean(profile?.approved && profile.role === 'admin')
@@ -324,9 +364,12 @@ function App() {
     if (!supabase) return
     let cancelled = false
     async function loadSiteSettings() {
-      const { data, error } = await supabase!.from('site_settings').select('hero').eq('id', 1).maybeSingle()
+      const { data, error } = await supabase!.from('site_settings').select('hero,background').eq('id', 1).maybeSingle()
       if (cancelled) return
-      if (!error && data?.hero) setHero(normalizeHero(data.hero))
+      if (!error) {
+        if (data?.hero) setHero(normalizeHero(data.hero))
+        setBackground(normalizeBackground(data?.background))
+      }
     }
     void loadSiteSettings()
     return () => { cancelled = true }
@@ -474,6 +517,75 @@ function App() {
       .eq('id', 1)
     setSiteSaving(false)
     setNotice(error ? `Header konnte nicht gespeichert werden: ${error.message}` : 'Header-Inhalte wurden veröffentlicht.')
+  }
+
+  async function saveBackgroundSettings(nextValue: SiteBackgroundSettings = background, successMessage = 'Hintergrund-Einstellungen wurden veröffentlicht.') {
+    if (!supabase || !isAdmin || !user) return false
+    const cleaned = normalizeBackground(nextValue)
+    setSiteSaving(true)
+    const { error } = await supabase
+      .from('site_settings')
+      .update({ background: cleaned, updated_at: new Date().toISOString(), updated_by: user.id })
+      .eq('id', 1)
+    setSiteSaving(false)
+    if (error) {
+      setNotice(`Hintergrund konnte nicht gespeichert werden: ${error.message}`)
+      return false
+    }
+    setBackground(cleaned)
+    setNotice(successMessage)
+    return true
+  }
+
+  async function uploadSiteBackground(file: File | null) {
+    if (!file || !supabase || !isAdmin || !user) return
+    if (!SITE_BACKGROUND_MIME_TYPES.has(file.type)) {
+      setNotice('Bitte nur PNG-, JPG- oder WebP-Dateien verwenden.')
+      return
+    }
+    if (file.size > SITE_BACKGROUND_MAX_BYTES) {
+      setNotice('Das Hintergrundbild darf maximal 10 MB groß sein.')
+      return
+    }
+
+    const extension = file.type === 'image/png' ? 'png' : file.type === 'image/webp' ? 'webp' : 'jpg'
+    const unique = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+    const path = `backgrounds/${user.id}/${unique}.${extension}`
+    const previousPath = background.path
+
+    setBackgroundUploadBusy(true)
+    const { error: uploadError } = await supabase.storage
+      .from(SITE_BACKGROUND_BUCKET)
+      .upload(path, file, { cacheControl: '3600', contentType: file.type, upsert: false })
+
+    if (uploadError) {
+      setBackgroundUploadBusy(false)
+      setNotice(`Upload fehlgeschlagen: ${uploadError.message}`)
+      return
+    }
+
+    const { data: publicData } = supabase.storage.from(SITE_BACKGROUND_BUCKET).getPublicUrl(path)
+    const nextBackground = normalizeBackground({ ...background, enabled: true, url: publicData.publicUrl, path })
+    const saved = await saveBackgroundSettings(nextBackground, 'Neuer Website-Hintergrund wurde hochgeladen und aktiviert.')
+
+    if (!saved) {
+      await supabase.storage.from(SITE_BACKGROUND_BUCKET).remove([path])
+    } else if (previousPath && previousPath !== path) {
+      await supabase.storage.from(SITE_BACKGROUND_BUCKET).remove([previousPath])
+    }
+
+    setBackgroundUploadBusy(false)
+    if (backgroundInputRef.current) backgroundInputRef.current.value = ''
+  }
+
+  async function removeSiteBackground() {
+    if (!supabase || !isAdmin) return
+    const oldPath = background.path
+    const saved = await saveBackgroundSettings(DEFAULT_BACKGROUND, 'Eigener Hintergrund wurde entfernt. Das Standarddesign ist wieder aktiv.')
+    if (saved && oldPath) {
+      const { error } = await supabase.storage.from(SITE_BACKGROUND_BUCKET).remove([oldPath])
+      if (error) setNotice(`Einstellungen wurden zurückgesetzt, die alte Bilddatei konnte aber nicht gelöscht werden: ${error.message}`)
+    }
   }
 
   async function refreshParticipants() {
@@ -823,8 +935,30 @@ function App() {
     }
   }
 
+  const defaultFloralUrl = `${import.meta.env.BASE_URL}brume-floral-default.png`
+
   return (
     <div className="app-shell">
+      {!background.hideDefaultFloral && (
+        <div
+          className="site-background-layer site-background-layer--floral"
+          style={{ backgroundImage: `url("${defaultFloralUrl}")` }}
+          aria-hidden="true"
+        />
+      )}
+      {background.enabled && background.url && (
+        <div
+          className="site-background-layer site-background-layer--custom"
+          style={{
+            backgroundImage: `url("${background.url}")`,
+            backgroundSize: background.fit,
+            backgroundPosition: background.position,
+            backgroundRepeat: background.repeat,
+            opacity: background.opacity / 100,
+          }}
+          aria-hidden="true"
+        />
+      )}
       <header className="topbar">
         <div className="container topbar__inner">
           <a className="brand" href="#top"><span className="brand__live">LIVE</span><span>FEELINGS//TOURNAMENT</span></a>
@@ -923,6 +1057,7 @@ function App() {
               <div className="section-heading"><div><span className="step">ADMIN</span><h2>Website & Turnier-Einstellungen</h2></div></div>
               <div className="settings-tabs" role="tablist" aria-label="Admin Einstellungen">
                 <button className={settingsTab === 'header' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('header')}>Header-Inhalte</button>
+                <button className={settingsTab === 'background' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('background')}>Website-Hintergrund</button>
                 <button className={settingsTab === 'group' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('group')}>Gruppenphase</button>
               </div>
 
@@ -936,6 +1071,43 @@ function App() {
                     {hero.tags.map((tag, index) => <label key={index}>Tag {index + 1}<input className="text-input" maxLength={32} value={tag} onChange={(event) => setHero((current) => ({ ...current, tags: current.tags.map((item, tagIndex) => tagIndex === index ? event.target.value : item) }))} /></label>)}
                   </div>
                   <button className="button button--twitch" disabled={siteSaving} onClick={() => void saveHeroSettings()}>{siteSaving ? 'Wird gespeichert …' : 'Header veröffentlichen'}</button>
+                </div>
+              ) : settingsTab === 'background' ? (
+                <div className="settings-content background-settings">
+                  <p className="muted">Lade einen eigenen Website-Hintergrund hoch. Er wird in Supabase gespeichert und ist nach dem Veröffentlichen für alle Besucher sichtbar. PNG, JPG und WebP bis 10 MB sind erlaubt.</p>
+                  <div className="background-preview" aria-label="Hintergrund Vorschau">
+                    {!background.hideDefaultFloral && <img src={defaultFloralUrl} alt="Florales Brume/Twitch Standardmuster" />}
+                    {background.enabled && background.url && <img className="background-preview__custom" src={background.url} alt="Aktueller eigener Website-Hintergrund" />}
+                    {!background.enabled && <span>Standarddesign aktiv</span>}
+                  </div>
+
+                  <div className="background-upload-actions">
+                    <input
+                      ref={backgroundInputRef}
+                      className="visually-hidden-file"
+                      id="site-background-upload"
+                      type="file"
+                      disabled={backgroundUploadBusy}
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={(event) => void uploadSiteBackground(event.target.files?.[0] ?? null)}
+                    />
+                    <label className="button button--twitch" htmlFor="site-background-upload" aria-disabled={backgroundUploadBusy}>{backgroundUploadBusy ? 'Bild wird hochgeladen …' : 'Bilddatei hochladen'}</label>
+                    {background.path && <button className="button button--danger" disabled={backgroundUploadBusy || siteSaving} onClick={() => void removeSiteBackground()}>Eigenes Bild entfernen</button>}
+                  </div>
+
+                  <div className="background-settings-grid">
+                    <label className="background-toggle"><input type="checkbox" checked={background.enabled} disabled={!background.url} onChange={(event) => setBackground((current) => ({ ...current, enabled: event.target.checked }))} /><span>Eigenes Hintergrundbild aktivieren</span></label>
+                    <label className="background-toggle"><input type="checkbox" checked={background.hideDefaultFloral} onChange={(event) => setBackground((current) => ({ ...current, hideDefaultFloral: event.target.checked }))} /><span>Florales Standardmuster darunter ausblenden</span></label>
+                    <label>Darstellung<select className="select-input" value={background.fit} onChange={(event) => setBackground((current) => ({ ...current, fit: event.target.value as SiteBackgroundSettings['fit'] }))}><option value="cover">Cover · Fläche füllen</option><option value="contain">Contain · vollständig sichtbar</option></select></label>
+                    <label>Position<select className="select-input" value={background.position} onChange={(event) => setBackground((current) => ({ ...current, position: event.target.value as SiteBackgroundSettings['position'] }))}><option value="center top">Oben mittig</option><option value="center center">Mittig</option><option value="left top">Oben links</option><option value="right top">Oben rechts</option></select></label>
+                    <label>Wiederholung<select className="select-input" value={background.repeat} onChange={(event) => setBackground((current) => ({ ...current, repeat: event.target.value as SiteBackgroundSettings['repeat'] }))}><option value="no-repeat">Nicht wiederholen</option><option value="repeat">Horizontal & vertikal kacheln</option><option value="repeat-y">Nur vertikal wiederholen</option></select></label>
+                    <label className="background-opacity">Deckkraft · {background.opacity}%<input type="range" min="10" max="100" step="1" value={background.opacity} onChange={(event) => setBackground((current) => ({ ...current, opacity: Number(event.target.value) }))} /></label>
+                  </div>
+
+                  <div className="background-settings-footer">
+                    <button className="button button--twitch" disabled={siteSaving || backgroundUploadBusy} onClick={() => void saveBackgroundSettings()}>{siteSaving ? 'Wird gespeichert …' : 'Hintergrund veröffentlichen'}</button>
+                    <button className="button button--ghost" disabled={siteSaving || backgroundUploadBusy} onClick={() => setBackground(DEFAULT_BACKGROUND)}>Einstellungen auf Standard setzen</button>
+                  </div>
                 </div>
               ) : (
                 <div className="settings-content">

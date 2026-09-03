@@ -68,6 +68,13 @@ export type HeroContent = {
   tags: string[]
 }
 
+export type ScoringWeights = {
+  kill: number
+  assist: number
+  death: number
+  positiveBonus: number
+  negativePenalty: number
+}
 
 export type SiteBackgroundSettings = {
   enabled: boolean

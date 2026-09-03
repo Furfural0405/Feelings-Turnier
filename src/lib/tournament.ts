@@ -1,4 +1,4 @@
-import { calculateTotalScore, emptyParticipantStats } from './scoring'
+import { calculateTotalScore, DEFAULT_SCORING_WEIGHTS, emptyParticipantStats } from './scoring'
 import type {
   KnockoutBracket,
   KnockoutMatch,
@@ -6,6 +6,7 @@ import type {
   ParticipantStats,
   QualificationPlan,
   QualifiedPlayer,
+  ScoringWeights,
   StandingRow,
   TournamentGroup,
 } from '../types'
@@ -39,6 +40,7 @@ export function buildStandings(
   group: TournamentGroup,
   participants: Participant[],
   stats: Record<string, ParticipantStats>,
+  scoringWeights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
 ): StandingRow[] {
   const participantMap = new Map(participants.map((participant) => [participant.id, participant]))
 
@@ -53,7 +55,7 @@ export function buildStandings(
       return {
         participantId,
         name: participant?.name ?? 'Unbekannt',
-        totalPoints: calculateTotalScore(participantStats),
+        totalPoints: calculateTotalScore(participantStats, scoringWeights),
         kills,
         assists,
         deaths,
@@ -218,9 +220,10 @@ export function createGlobalKnockoutBracket(
   participants: Participant[],
   stats: Record<string, ParticipantStats>,
   qualifiersPerGroup: number,
+  scoringWeights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
 ): KnockoutBracket {
   const qualifiers: QualifiedPlayer[] = groups.flatMap((group) =>
-    buildStandings(group, participants, stats)
+    buildStandings(group, participants, stats, scoringWeights)
       .slice(0, qualifiersPerGroup)
       .map((row, index) => ({
         participantId: row.participantId,

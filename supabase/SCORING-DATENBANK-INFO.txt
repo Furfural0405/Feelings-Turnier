@@ -1,0 +1,11 @@
+Die produktive Supabase-Datenbank wurde bereits um site_settings.scoring ergänzt.
+Standardwert:
+{
+  "kill": 1,
+  "assist": 1,
+  "death": 1.5,
+  "positiveBonus": 3,
+  "negativePenalty": 3
+}
+
+Kein manueller SQL-Schritt erforderlich.

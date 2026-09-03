@@ -35,7 +35,7 @@ export type QualificationPlan = {
   knockoutSize: number
   adjusted: boolean
   smallestGroupSize: number
-  smallTournamentException: boolean
+  smallTournamentOverride: boolean
 }
 
 export type QualifiedPlayer = {
@@ -65,4 +65,14 @@ export type TournamentState = {
   groups: TournamentGroup[]
   stats: Record<string, ParticipantStats>
   knockoutBracket: KnockoutBracket | null
+}
+
+export type StoredTournamentState = Omit<TournamentState, 'participants'>
+
+export type AccessProfile = {
+  id: string
+  email: string
+  approved: boolean
+  role: 'viewer' | 'admin'
+  created_at: string
 }

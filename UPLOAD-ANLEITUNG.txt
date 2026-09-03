@@ -1,35 +1,24 @@
-FEELINGS-TURNIER – UPLOAD-ANLEITUNG
-===================================
+FEELINGS TURNIER – EMAIL ADMIN PATCH
+====================================
 
-Diese Dateien ERSETZEN die vorhandenen Dateien im Repository.
-Nicht als neue Dateien mit anderem Namen anlegen.
+ERSETZEN:
+- package.json
+- .github/workflows/static.yml
+- src/App.tsx
+- src/styles.css
+- src/types.ts
+- src/lib/tournament.ts
+- index.html
+- public/favicon.svg
 
-Zu ersetzen:
+NEU HINZUFÜGEN:
+- src/lib/supabase.ts
+- src/vite-env.d.ts
+- .env.example
+- supabase/setup.sql
 
-.github/workflows/static.yml
-src/App.tsx
-src/styles.css
-src/types.ts
-src/lib/tournament.ts
-public/favicon.svg
-index.html
-README.md
+Danach Supabase einrichten (README beachten) und in GitHub Repository Variables setzen:
+- VITE_SUPABASE_URL
+- VITE_SUPABASE_PUBLISHABLE_KEY
 
-UPLOAD-ANLEITUNG.txt muss NICHT ins Repository hochgeladen werden.
-
-Kurzablauf auf GitHub:
-1. Repository Furfural0405/Feelings-Turnier öffnen.
-2. Jede oben genannte Datei am gleichen Pfad öffnen.
-3. "Edit this file" / Stift anklicken.
-4. Inhalt vollständig durch die jeweilige Datei aus diesem Paket ersetzen.
-5. Änderungen nach main committen.
-6. Unter Actions den Workflow "feelingsturnier" prüfen.
-7. Nach erfolgreichem Run die GitHub-Pages-Seite neu laden.
-
-Neue KO-Sonderregel:
-- Unter 4 Teilnehmern: kein 4er-KO möglich.
-- 4 bis 7 Teilnehmer + 1 Gruppe: Top 4 in die KO-Phase, #1 vs #4 und #2 vs #3.
-- 4 bis 7 Teilnehmer + 2 oder mehr gewünschte Gruppen: automatisch 2 Gruppen, Top 2 je Gruppe.
-- Dabei darf die 50%-Grenze überschritten werden.
-- Ab 8 Teilnehmern gilt wieder: mindestens Top 2, maximal 50% der kleinsten Gruppe.
-- Bei mehreren Gruppen wird die erste KO-Runde immer gruppenübergreifend gesetzt.
+Wichtig: NIEMALS einen Supabase service_role Key in GitHub Pages verwenden.

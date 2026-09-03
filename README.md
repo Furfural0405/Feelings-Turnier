@@ -1,63 +1,131 @@
-# Feelings-Turnier · Brume Community Tournament
+# Feelings Turnier – E-Mail-Freischaltung
 
-React-/TypeScript-Turnierverwaltung für die Feelings-Community.
+Diese Version erweitert das Gaming-Turnier um einen sicheren Login- und Adminbereich mit **Supabase Auth + Row Level Security**.
 
-## Turnierlogik
+## Rechte
 
-- Gruppenphase mit drei KDA-Games pro Spieler
-- danach genau **eine gemeinsame K.-o.-Phase**
-- bei mehreren Gruppen wird die erste K.-o.-Runde gruppenübergreifend gesetzt
-- Gruppenerste treffen auf niedriger gesetzte Spieler aus anderen Gruppen
-- bei Top 2 gilt: #1 einer Gruppe gegen #2 einer anderen Gruppe
-- bei Top 4 gilt analog: #1 gegen #4 und #2 gegen #3 aus anderen Gruppen
-- K.-o.-Feld: 4, 8, 16 oder maximal 32 Spieler
+### Besucher / nicht freigeschaltete Accounts
+- dürfen die öffentliche Seite und Regeln sehen,
+- dürfen unter **01 Teilnehmer** einen Namen/Gamer-Tag einreichen,
+- sehen **keine bereits angemeldeten Teilnehmernamen**,
+- sehen keine Gruppen/Ranglisten/KDA-Daten/K.O.-Matches,
+- dürfen nichts am Turnier verändern.
 
-### Sonderregel bei weniger als 8 Teilnehmern
+### Freigeschaltete Admins
+- sehen alle Teilnehmer-Anmeldungen,
+- verwalten Gruppen und KDA,
+- erstellen die globale K.O.-Phase,
+- wählen Match-Sieger,
+- können neue registrierte Accounts per E-Mail freischalten,
+- können Turnierstand importieren/exportieren/zurücksetzen.
 
-Bei insgesamt 4 bis 7 Teilnehmern werden **immer 4 Spieler** in die K.-o.-Phase übernommen. Die normale 50-%-Grenze gilt in diesem Sonderfall ausdrücklich nicht.
+Die Sperre ist nicht nur optisch: Supabase RLS verhindert serverseitig, dass nicht freigeschaltete Nutzer Teilnehmerlisten oder Turnierdaten abfragen.
 
-- 1 Gruppe: Top 4 dieser Gruppe ziehen weiter; erste Runde #1 vs #4 und #2 vs #3
-- 2 oder mehr gewünschte Gruppen: die App passt automatisch auf 2 Gruppen an; Top 2 jeder Gruppe ziehen weiter
-- bei 2 Gruppen wird gruppenübergreifend gesetzt: A1 vs B2 und B1 vs A2
-- unter 4 Teilnehmern ist kein 4er-K.-o.-Feld möglich
+---
 
-### Standardregel ab 8 Teilnehmern
+## 1. Supabase-Projekt erstellen
 
-- mindestens Top 2 je Gruppe
-- höchstens 50 % der kleinsten Gruppe
-- gleiche Anzahl Qualifikanten pro Gruppe
-- automatische Anpassung der Gruppenzahl, wenn die gewünschte Gruppenzahl kein sauberes K.-o.-Feld ergibt
-- bei einer gewünschten Einzelgruppe wird ab 8 Teilnehmern auf eine passende Mehrgruppen-Konstellation angepasst, damit die erste K.-o.-Runde gruppenübergreifend gesetzt werden kann
+1. Auf https://supabase.com ein neues Projekt erstellen.
+2. Im Projekt **SQL Editor** öffnen.
+3. Den kompletten Inhalt von `supabase/setup.sql` ausführen.
 
-## Beispiel 50 Teilnehmer / 10 gewünschte Gruppen
+## 2. E-Mail-Login konfigurieren
 
-Die App passt automatisch an:
+Unter **Authentication** den E-Mail/Passwort-Login aktiviert lassen.
 
-- 50 Teilnehmer
-- 8 Gruppen
-- Top 2 je Gruppe
-- 16 Qualifikanten
-- Start im Achtelfinale
+Empfohlen: E-Mail-Bestätigung aktivieren. Setze außerdem in den URL-/Redirect-Einstellungen deine GitHub-Pages-Adresse, z. B.:
 
-Die erste Runde wird gruppenübergreifend gesetzt, z. B. A1 gegen B2, B1 gegen C2 usw. Spieler derselben Gruppe treffen in der ersten K.-o.-Runde nicht aufeinander.
+`https://furfural0405.github.io/Feelings-Turnier/`
+
+## 3. Supabase-Werte holen
+
+Unter **Project Settings → API** benötigst du:
+
+- Project URL
+- Publishable Key (oder Legacy `anon` Key)
+
+**Niemals den `service_role` Key in GitHub oder in die Webseite eintragen.**
+
+## 4. GitHub Repository Variables setzen
+
+Im GitHub-Repository:
+
+**Settings → Secrets and variables → Actions → Variables**
+
+Erstelle zwei Repository Variables:
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_PUBLISHABLE_KEY`
+
+Der Workflow übergibt diese Werte beim Vite-Build.
+
+Für lokale Entwicklung kannst du `.env.example` nach `.env` kopieren und dort dieselben Werte eintragen.
+
+## 5. Deinen ersten Admin freischalten
+
+1. Webseite deployen.
+2. Rechts oben **Admin Login → Registrieren**.
+3. Deinen Account mit deiner E-Mail + Passwort registrieren.
+4. Falls aktiviert: E-Mail bestätigen.
+5. Danach im Supabase **SQL Editor** einmal ausführen:
+
+```sql
+update public.profiles
+set approved = true, role = 'admin'
+where email = 'DEINE-EMAIL@BEISPIEL.DE';
+```
+
+Danach neu einloggen. Jetzt bist du Admin.
+
+Ab dann brauchst du den SQL Editor für Freigaben nicht mehr: Im Bereich **Zugriffsfreigaben** erscheinen registrierte Accounts und können per Button freigeschaltet werden.
+
+---
+
+## K.O.-Regeln
+
+- 4–7 Teilnehmer: immer vier Spieler in der K.O.-Phase.
+  - 1 Gruppe → Top 4.
+  - 2 oder mehr gewünschte Gruppen → automatisch 2 Gruppen, Top 2 je Gruppe.
+  - Die 50%-Grenze darf dabei überschritten werden.
+- Ab 8 Teilnehmern:
+  - mindestens Top 2 je Gruppe,
+  - höchstens 50 % der kleinsten Gruppe,
+  - gleiche Zahl Qualifikanten je Gruppe,
+  - K.O.-Feld 4 / 8 / 16 / 32,
+  - maximal Start im Sechzehntelfinale.
+- Bei mehreren Gruppen sind die Matches der ersten K.O.-Runde gruppenübergreifend gesetzt.
+- Top 2: Gruppenerster gegen Gruppenzweiten einer anderen Gruppe.
 
 ## Punktesystem
 
-Pro Game:
+Pro Spiel:
 
-- Kill: +1
-- Assist: +1
-- Death: -1,5
-- Kills + Assists > Deaths: +3
-- Kills + Assists < Deaths: -3
-- Gleichstand: kein Bonus/Malus
+`Kills + Assists - 1,5 × Deaths`
 
-## Design
+Zusätzlich:
 
-Das Theme ist bewusst dunkler gehalten und verbindet BrumeFeelings-typische Pink-Akzente mit Gaming-/Streaming-Elementen: dunkle Overlay-Flächen, Twitch-Purple, Live-Badge, Stream-Frame, HUD-/Crosshair-Details und dezente Chat-Optik.
+- Kills + Assists > Deaths → `+3`
+- Kills + Assists < Deaths → `-3`
+- Gleichstand → kein Zusatzwert
 
-## GitHub Pages
+---
 
-Der Workflow `.github/workflows/static.yml` installiert die npm-Abhängigkeiten, baut die Vite-App und lädt ausschließlich `dist/` auf GitHub Pages.
+## Dateien dieses Patches
 
-Unter **Settings → Pages → Build and deployment** muss als Source **GitHub Actions** gewählt sein.
+### Ersetzen
+- `package.json`
+- `.github/workflows/static.yml`
+- `src/App.tsx`
+- `src/styles.css`
+- `src/types.ts`
+- `src/lib/tournament.ts`
+- `index.html`
+- `public/favicon.svg`
+
+### Neu hinzufügen
+- `src/lib/supabase.ts`
+- `src/vite-env.d.ts`
+- `.env.example`
+- `supabase/setup.sql`
+
+Bestehende Dateien wie `src/main.tsx`, `src/lib/scoring.ts`, `vite.config.ts` und die TypeScript-Konfiguration bleiben erhalten.

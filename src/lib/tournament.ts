@@ -70,25 +70,17 @@ export function buildStandings(
 }
 
 function isPowerOfTwo(value: number): boolean {
-  return value >= 2 && value <= 32 && (value & (value - 1)) === 0
+  return value >= 4 && value <= 32 && (value & (value - 1)) === 0
 }
 
 /**
- * Calculates the global knockout plan.
- *
- * Standard rules:
- * - the requested group count may be adjusted automatically until a clean knockout field exists,
- * - at least Top 2 of every group advance,
- * - never more than 50% of the smallest group advance,
- * - every group sends the same number of players,
- * - knockout field must be 4/8/16/32 players (maximum start: round of 32),
- * - with multiple groups, first-round matches are always cross-group.
- *
- * Small-tournament exception (4-7 total participants):
- * - the knockout field always has 4 players,
- * - requested 1 group -> Top 4 from that group,
- * - requested 2+ groups -> automatically 2 groups, Top 2 from each,
- * - the 50% limit is deliberately ignored for this exception.
+ * KO-Regeln:
+ * - 4–7 Teilnehmer: immer vier Qualifikanten.
+ *   - bei 1 Gruppe: Top 4 dieser Gruppe,
+ *   - bei >=2 gewünschten Gruppen: automatisch 2 Gruppen, Top 2 je Gruppe.
+ *   Die 50%-Grenze darf in diesem Sonderfall überschritten werden.
+ * - ab 8 Teilnehmern: mindestens Top 2 je Gruppe, höchstens 50% der kleinsten Gruppe,
+ *   gleiche Zahl Qualifikanten je Gruppe, KO-Feld 4/8/16/32, maximal Sechzehntelfinale.
  */
 export function createQualificationPlan(participantCount: number, requestedGroupCount: number): QualificationPlan | null {
   const participants = Math.max(0, Math.trunc(participantCount))
@@ -97,28 +89,50 @@ export function createQualificationPlan(participantCount: number, requestedGroup
   if (participants < 4) return null
 
   if (participants < 8) {
-    const groupCount = requested === 1 ? 1 : 2
-    const qualifiersPerGroup = groupCount === 1 ? 4 : 2
-    const smallestGroupSize = Math.floor(participants / groupCount)
+    if (requested <= 1) {
+      return {
+        requestedGroupCount: requested,
+        groupCount: 1,
+        qualifiersPerGroup: 4,
+        knockoutSize: 4,
+        adjusted: false,
+        smallestGroupSize: participants,
+        smallTournamentOverride: true,
+      }
+    }
 
     return {
       requestedGroupCount: requested,
-      groupCount,
-      qualifiersPerGroup,
+      groupCount: 2,
+      qualifiersPerGroup: 2,
       knockoutSize: 4,
-      adjusted: groupCount !== requested,
-      smallestGroupSize,
-      smallTournamentException: true,
+      adjusted: requested !== 2,
+      smallestGroupSize: Math.floor(participants / 2),
+      smallTournamentOverride: true,
     }
   }
 
-  // From 8 players onward we prefer cross-group seeding, so a one-group request
-  // is automatically expanded to two groups when a valid plan exists.
-  const preferredMinimumGroups = requested === 1 ? 2 : 2
-  const requestedSearchStart = requested === 1 ? 2 : requested
-  const maximumGroups = Math.min(requestedSearchStart, 10, Math.floor(participants / 4))
+  if (requested === 1) {
+    const maxQualifiers = Math.min(32, Math.floor(participants / 2))
+    for (const knockoutSize of [32, 16, 8, 4]) {
+      if (knockoutSize <= maxQualifiers) {
+        return {
+          requestedGroupCount: requested,
+          groupCount: 1,
+          qualifiersPerGroup: knockoutSize,
+          knockoutSize,
+          adjusted: false,
+          smallestGroupSize: participants,
+          smallTournamentOverride: false,
+        }
+      }
+    }
+    return null
+  }
 
-  for (let groupCount = maximumGroups; groupCount >= preferredMinimumGroups; groupCount -= 1) {
+  const maximumGroups = Math.min(requested, 10, Math.floor(participants / 4))
+
+  for (let groupCount = maximumGroups; groupCount >= 2; groupCount -= 1) {
     const smallestGroupSize = Math.floor(participants / groupCount)
     const halfLimit = Math.floor(smallestGroupSize / 2)
     const bracketLimit = Math.floor(32 / groupCount)
@@ -126,7 +140,7 @@ export function createQualificationPlan(participantCount: number, requestedGroup
 
     for (let qualifiersPerGroup = maxQualifiersPerGroup; qualifiersPerGroup >= 2; qualifiersPerGroup -= 1) {
       const knockoutSize = groupCount * qualifiersPerGroup
-      if (!isPowerOfTwo(knockoutSize) || knockoutSize < 4) continue
+      if (!isPowerOfTwo(knockoutSize)) continue
 
       return {
         requestedGroupCount: requested,
@@ -135,7 +149,7 @@ export function createQualificationPlan(participantCount: number, requestedGroup
         knockoutSize,
         adjusted: groupCount !== requested,
         smallestGroupSize,
-        smallTournamentException: false,
+        smallTournamentOverride: false,
       }
     }
   }
@@ -156,12 +170,28 @@ function orderedGroupIndex(groups: TournamentGroup[]): Map<string, number> {
   return new Map(groups.map((group, index) => [group.id, index]))
 }
 
+function pairSingleGroup(qualifiers: QualifiedPlayer[]): KnockoutMatch[] {
+  const sorted = [...qualifiers].sort((a, b) => a.groupRank - b.groupRank)
+  const matches: KnockoutMatch[] = []
+  for (let index = 0; index < sorted.length / 2; index += 1) {
+    const high = sorted[index]
+    const low = sorted[sorted.length - 1 - index]
+    matches.push({
+      id: `ko-r0-m${index}`,
+      player1Id: high.participantId,
+      player2Id: low.participantId,
+      winnerId: null,
+    })
+  }
+  return matches
+}
+
 /**
- * First knockout round for multiple groups: high group seeds face low group seeds
- * from a DIFFERENT group. Top 2 example: A1-B2, B1-C2, ..., H1-A2.
- * Top 4 example: rank 1 vs rank 4 cross-group and rank 2 vs rank 3 cross-group.
+ * Mehrere Gruppen: hohe Gruppenplatzierung gegen niedrige Platzierung aus ANDERER Gruppe.
+ * Top 2: A1-B2, B1-C2, ...; bei zwei Gruppen A1-B2 und B1-A2.
+ * Top 4: #1 gegen #4 einer anderen Gruppe und #2 gegen #3 einer anderen Gruppe.
  */
-function pairCrossGroupSeeds(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]): KnockoutMatch[] {
+function pairCrossGroup(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]): KnockoutMatch[] {
   if (groups.length < 2 || qualifiers.length < 4) return []
 
   const groupOrder = orderedGroupIndex(groups)
@@ -181,9 +211,7 @@ function pairCrossGroupSeeds(qualifiers: QualifiedPlayer[], groups: TournamentGr
 
     if (highPot.length !== groups.length || lowPot.length !== groups.length) return []
 
-    // Rotating the lower-seed pot guarantees a different source group.
     const rotation = groups.length === 2 ? 1 : (rankIndex % (groups.length - 1)) + 1
-
     highPot.forEach((highSeed, index) => {
       const lowSeed = lowPot[(index + rotation) % lowPot.length]
       matches.push({
@@ -196,26 +224,6 @@ function pairCrossGroupSeeds(qualifiers: QualifiedPlayer[], groups: TournamentGr
   }
 
   return matches
-}
-
-function pairSingleGroupSeeds(qualifiers: QualifiedPlayer[]): KnockoutMatch[] {
-  const ordered = [...qualifiers].sort((a, b) => a.groupRank - b.groupRank)
-  if (ordered.length !== 4) return []
-
-  return [
-    {
-      id: 'ko-r0-m0',
-      player1Id: ordered[0]?.participantId ?? null,
-      player2Id: ordered[3]?.participantId ?? null,
-      winnerId: null,
-    },
-    {
-      id: 'ko-r0-m1',
-      player1Id: ordered[1]?.participantId ?? null,
-      player2Id: ordered[2]?.participantId ?? null,
-      winnerId: null,
-    },
-  ]
 }
 
 export function createGlobalKnockoutBracket(
@@ -235,9 +243,7 @@ export function createGlobalKnockoutBracket(
       })),
   )
 
-  const firstRound = groups.length === 1
-    ? pairSingleGroupSeeds(qualifiers)
-    : pairCrossGroupSeeds(qualifiers, groups)
+  const firstRound = groups.length === 1 ? pairSingleGroup(qualifiers) : pairCrossGroup(qualifiers, groups)
   const rounds: KnockoutMatch[][] = []
 
   if (firstRound.length * 2 !== qualifiers.length) {
@@ -294,9 +300,7 @@ export function updateBracketWinner(
       const player2Id = previousRound[index * 2 + 1]?.winnerId ?? null
       match.player1Id = player1Id
       match.player2Id = player2Id
-      if (match.winnerId !== player1Id && match.winnerId !== player2Id) {
-        match.winnerId = null
-      }
+      if (match.winnerId !== player1Id && match.winnerId !== player2Id) match.winnerId = null
     })
   }
 
@@ -310,5 +314,5 @@ export function roundName(totalPlayers: number, roundIndex: number): string {
   if (playersInRound === 8) return 'Viertelfinale'
   if (playersInRound === 16) return 'Achtelfinale'
   if (playersInRound === 32) return 'Sechzehntelfinale'
-  return `Runde der letzten ${playersInRound}`
+  return `Top ${playersInRound}`
 }

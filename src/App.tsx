@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, KeyboardEvent } from 'react'
+import type { FormEvent } from 'react'
+import type { User } from '@supabase/supabase-js'
 import {
   buildStandings,
   createGlobalKnockoutBracket,
@@ -10,10 +11,16 @@ import {
   updateBracketWinner,
 } from './lib/tournament'
 import { calculateRoundScore, emptyParticipantStats, formatPoints } from './lib/scoring'
-import type { ParticipantStats, QualificationPlan, RoundStats, TournamentState } from './types'
-
-const STORAGE_KEY = 'das-feelings-turnier:v4'
-const LEGACY_STORAGE_KEYS = ['das-feelings-turnier:v3', 'das-feelings-turnier:v2', 'das-feelings-turnier:v1']
+import { supabase, supabaseConfigured } from './lib/supabase'
+import type {
+  AccessProfile,
+  Participant,
+  ParticipantStats,
+  QualificationPlan,
+  RoundStats,
+  StoredTournamentState,
+  TournamentState,
+} from './types'
 
 const DEFAULT_STATE: TournamentState = {
   participants: [],
@@ -23,66 +30,48 @@ const DEFAULT_STATE: TournamentState = {
   knockoutBracket: null,
 }
 
-function loadState(): TournamentState {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY) ?? LEGACY_STORAGE_KEYS.map((key) => localStorage.getItem(key)).find(Boolean)
-    if (!raw) return DEFAULT_STATE
-    const parsed = JSON.parse(raw) as Partial<TournamentState>
-    return {
-      participants: Array.isArray(parsed.participants) ? parsed.participants : [],
-      groupCount: Number(parsed.groupCount) >= 1 && Number(parsed.groupCount) <= 10 ? Number(parsed.groupCount) : 2,
-      groups: Array.isArray(parsed.groups) ? parsed.groups : [],
-      stats: parsed.stats && typeof parsed.stats === 'object' ? parsed.stats : {},
-      knockoutBracket: parsed.knockoutBracket ?? null,
-    }
-  } catch {
-    return DEFAULT_STATE
+function planText(plan: QualificationPlan | null): string {
+  if (!plan) return 'Ab 4 Teilnehmern kann eine K.O.-Phase erzeugt werden.'
+  const override = plan.smallTournamentOverride ? ' · Sonderregel unter 8 Teilnehmern' : ''
+  return `${plan.groupCount} Gruppe${plan.groupCount === 1 ? '' : 'n'} · Top ${plan.qualifiersPerGroup} · ${plan.knockoutSize} Spieler · ${roundName(plan.knockoutSize, 0)}${override}`
+}
+
+function storedState(state: TournamentState): StoredTournamentState {
+  return {
+    groupCount: state.groupCount,
+    groups: state.groups,
+    stats: state.stats,
+    knockoutBracket: state.knockoutBracket,
   }
 }
 
-function downloadJson(data: TournamentState) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = `feelings-turnier-${new Date().toISOString().slice(0, 10)}.json`
-  anchor.click()
-  URL.revokeObjectURL(url)
-}
-
-function planText(plan: QualificationPlan | null): string {
-  if (!plan) return 'Für eine K.-o.-Phase werden mindestens 4 Teilnehmer benötigt.'
-  const exception = plan.smallTournamentException ? ' · Sonderregel für weniger als 8 Teilnehmer' : ''
-  return `${plan.groupCount} ${plan.groupCount === 1 ? 'Gruppe' : 'Gruppen'} · Top ${plan.qualifiersPerGroup} je Gruppe · ${plan.knockoutSize} Spieler in der K.-o.-Phase · Start im ${roundName(plan.knockoutSize, 0)}${exception}`
-}
-
 function App() {
-  const [state, setState] = useState<TournamentState>(loadState)
+  const [state, setState] = useState<TournamentState>(DEFAULT_STATE)
+  const [user, setUser] = useState<User | null>(null)
+  const [profile, setProfile] = useState<AccessProfile | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [adminDataLoaded, setAdminDataLoaded] = useState(false)
+  const [profiles, setProfiles] = useState<AccessProfile[]>([])
+  const [notice, setNotice] = useState('')
   const [newName, setNewName] = useState('')
   const [bulkNames, setBulkNames] = useState('')
-  const [notice, setNotice] = useState('')
+  const [showLogin, setShowLogin] = useState(false)
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [authBusy, setAuthBusy] = useState(false)
   const importRef = useRef<HTMLInputElement>(null)
+  const saveTimer = useRef<number | null>(null)
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  }, [state])
-
-  useEffect(() => {
-    if (!notice) return
-    const timeout = window.setTimeout(() => setNotice(''), 3600)
-    return () => window.clearTimeout(timeout)
-  }, [notice])
-
+  const isAdmin = Boolean(profile?.approved && profile.role === 'admin')
   const participantMap = useMemo(
     () => new Map(state.participants.map((participant) => [participant.id, participant])),
     [state.participants],
   )
-
   const previewPlan = useMemo(
     () => createQualificationPlan(state.participants.length, state.groupCount),
     [state.participants.length, state.groupCount],
   )
-
   const activePlan = useMemo(
     () =>
       state.groups.length > 0
@@ -90,46 +79,202 @@ function App() {
         : previewPlan,
     [previewPlan, state.groups.length, state.participants.length],
   )
-
   const championId = state.knockoutBracket?.rounds.at(-1)?.[0]?.winnerId ?? null
 
-  function addNames(names: string[]) {
-    const cleaned = names.map((name) => name.trim()).filter(Boolean)
-    if (cleaned.length === 0) return
+  useEffect(() => {
+    if (!notice) return
+    const timeout = window.setTimeout(() => setNotice(''), 4200)
+    return () => window.clearTimeout(timeout)
+  }, [notice])
 
-    setState((current) => {
-      const existing = new Set(current.participants.map((participant) => participant.name.trim().toLocaleLowerCase('de')))
-      const newParticipants = cleaned
-        .filter((name) => {
-          const key = name.toLocaleLowerCase('de')
-          if (existing.has(key)) return false
-          existing.add(key)
-          return true
-        })
-        .map((name) => ({ id: crypto.randomUUID(), name }))
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false)
+      return
+    }
 
-      if (newParticipants.length === 0) return current
-      return {
-        ...current,
-        participants: [...current.participants, ...newParticipants],
-        knockoutBracket: null,
-      }
+    let active = true
+
+    async function syncSession() {
+      const { data } = await supabase!.auth.getSession()
+      if (!active) return
+      setUser(data.session?.user ?? null)
+      setAuthLoading(false)
+    }
+
+    void syncSession()
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null)
+      setProfile(null)
+      setAdminDataLoaded(false)
+      if (!session) setState(DEFAULT_STATE)
     })
+
+    return () => {
+      active = false
+      listener.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!supabase || !user) {
+      setProfile(null)
+      return
+    }
+
+    let cancelled = false
+    async function loadProfile() {
+      const { data, error } = await supabase!
+        .from('profiles')
+        .select('id,email,approved,role,created_at')
+        .eq('id', user!.id)
+        .maybeSingle()
+
+      if (cancelled) return
+      if (error) {
+        setNotice(`Profil konnte nicht geladen werden: ${error.message}`)
+        return
+      }
+      setProfile(data as AccessProfile | null)
+    }
+
+    void loadProfile()
+    return () => {
+      cancelled = true
+    }
+  }, [user])
+
+  useEffect(() => {
+    if (!supabase || !isAdmin) {
+      setAdminDataLoaded(false)
+      return
+    }
+
+    let cancelled = false
+    async function loadAdminData() {
+      const [participantResult, stateResult, profileResult] = await Promise.all([
+        supabase!.from('participants').select('id,name').order('created_at', { ascending: true }),
+        supabase!.from('tournament_state').select('payload').eq('id', 1).maybeSingle(),
+        supabase!
+          .from('profiles')
+          .select('id,email,approved,role,created_at')
+          .order('created_at', { ascending: true }),
+      ])
+
+      if (cancelled) return
+      if (participantResult.error || stateResult.error || profileResult.error) {
+        setNotice(
+          participantResult.error?.message ?? stateResult.error?.message ?? profileResult.error?.message ?? 'Daten konnten nicht geladen werden.',
+        )
+        return
+      }
+
+      const participants = (participantResult.data ?? []) as Participant[]
+      const payload = (stateResult.data?.payload ?? {}) as Partial<StoredTournamentState>
+      setState({
+        participants,
+        groupCount: Number(payload.groupCount) >= 1 ? Number(payload.groupCount) : 2,
+        groups: Array.isArray(payload.groups) ? payload.groups : [],
+        stats: payload.stats && typeof payload.stats === 'object' ? payload.stats : {},
+        knockoutBracket: payload.knockoutBracket ?? null,
+      })
+      setProfiles((profileResult.data ?? []) as AccessProfile[])
+      setAdminDataLoaded(true)
+    }
+
+    void loadAdminData()
+    return () => {
+      cancelled = true
+    }
+  }, [isAdmin])
+
+  useEffect(() => {
+    if (!supabase || !isAdmin || !adminDataLoaded || !user) return
+    if (saveTimer.current) window.clearTimeout(saveTimer.current)
+
+    saveTimer.current = window.setTimeout(() => {
+      void supabase!
+        .from('tournament_state')
+        .upsert(
+          {
+            id: 1,
+            payload: storedState(state),
+            updated_at: new Date().toISOString(),
+            updated_by: user.id,
+          },
+          { onConflict: 'id' },
+        )
+        .then(({ error }) => {
+          if (error) setNotice(`Speichern fehlgeschlagen: ${error.message}`)
+        })
+    }, 700)
+
+    return () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current)
+    }
+  }, [state.groupCount, state.groups, state.stats, state.knockoutBracket, isAdmin, adminDataLoaded, user])
+
+  async function refreshParticipants() {
+    if (!supabase || !isAdmin) return
+    const { data, error } = await supabase.from('participants').select('id,name').order('created_at', { ascending: true })
+    if (error) {
+      setNotice(error.message)
+      return
+    }
+    const participants = (data ?? []) as Participant[]
+    setState((current) => ({ ...current, participants }))
   }
 
-  function addSingleParticipant() {
-    if (!newName.trim()) return
-    addNames([newName])
-    setNewName('')
+  async function submitParticipant(name: string) {
+    const cleaned = name.trim()
+    if (!cleaned) return false
+    if (!supabase) {
+      setNotice('Supabase ist noch nicht konfiguriert.')
+      return false
+    }
+
+    const { error } = await supabase.from('participants').insert({
+      name: cleaned,
+      submitted_by: user?.id ?? null,
+    })
+
+    if (error) {
+      if (error.code === '23505') setNotice('Dieser Gamer-Tag ist bereits angemeldet.')
+      else setNotice(`Anmeldung fehlgeschlagen: ${error.message}`)
+      return false
+    }
+
+    setNotice('✓ Gamer-Tag wurde für das Turnier angemeldet.')
+    if (isAdmin) await refreshParticipants()
+    return true
   }
 
-  function addBulkParticipants() {
-    const names = bulkNames.split(/[\n,;]+/)
-    addNames(names)
+  async function addSingleParticipant() {
+    if (await submitParticipant(newName)) setNewName('')
+  }
+
+  async function addBulkParticipants() {
+    if (!supabase || !isAdmin) return
+    const names = bulkNames.split(/[\n,;]+/).map((name) => name.trim()).filter(Boolean)
+    if (!names.length) return
+    const { error } = await supabase.from('participants').insert(names.map((name) => ({ name, submitted_by: user?.id ?? null })))
+    if (error) {
+      setNotice(`Liste konnte nicht vollständig übernommen werden: ${error.message}`)
+      return
+    }
     setBulkNames('')
+    await refreshParticipants()
+    setNotice(`${names.length} Teilnehmer hinzugefügt.`)
   }
 
-  function removeParticipant(participantId: string) {
+  async function removeParticipant(participantId: string) {
+    if (!supabase || !isAdmin) return
+    const { error } = await supabase.from('participants').delete().eq('id', participantId)
+    if (error) {
+      setNotice(error.message)
+      return
+    }
+
     setState((current) => {
       const stats = { ...current.stats }
       delete stats[participantId]
@@ -147,8 +292,9 @@ function App() {
   }
 
   function createGroups() {
-    if (state.participants.length === 0) {
-      setNotice('Bitte zuerst Teilnehmer hinzufügen. ♡')
+    if (!isAdmin) return
+    if (state.participants.length < 1) {
+      setNotice('Bitte zuerst Teilnehmer hinzufügen.')
       return
     }
 
@@ -165,604 +311,400 @@ function App() {
       knockoutBracket: null,
     }))
 
-    if (!plan) {
-      setNotice('Gruppen erstellt. Für die K.-o.-Phase werden mindestens 4 Teilnehmer benötigt.')
-    } else if (plan.adjusted) {
-      setNotice(
-        `Automatisch angepasst: ${plan.requestedGroupCount} gewünschte Gruppen → ${plan.groupCount} ${plan.groupCount === 1 ? 'Gruppe' : 'Gruppen'}, damit Top ${plan.qualifiersPerGroup} ein sauberes ${plan.knockoutSize}er-K.O.-Feld ergeben.`,
-      )
-    } else {
-      setNotice(`Gruppen erstellt · Top ${plan.qualifiersPerGroup} je Gruppe ziehen später in die K.-o.-Phase ein.`)
-    }
+    if (!plan) setNotice('Gruppen erstellt. Eine K.O.-Phase benötigt mindestens 4 Teilnehmer.')
+    else if (plan.adjusted) setNotice(`Automatisch angepasst: ${plan.requestedGroupCount} → ${plan.groupCount} Gruppen. ${planText(plan)}`)
+    else setNotice(`Gruppen erstellt. ${planText(plan)}`)
   }
 
   function updateStat(participantId: string, roundIndex: number, field: keyof RoundStats, rawValue: string) {
+    if (!isAdmin) return
     const value = Math.max(0, Math.trunc(Number(rawValue) || 0))
     setState((current) => {
       const participantStats = current.stats[participantId] ?? emptyParticipantStats()
       const rounds = participantStats.rounds.map((round, index) =>
         index === roundIndex ? { ...round, [field]: value } : { ...round },
       ) as ParticipantStats['rounds']
-
       return {
         ...current,
-        stats: {
-          ...current.stats,
-          [participantId]: { rounds },
-        },
+        stats: { ...current.stats, [participantId]: { rounds } },
         knockoutBracket: null,
       }
     })
   }
 
   function generateGlobalBracket() {
-    if (state.groups.length === 0 || !activePlan) {
-      setNotice('Die aktuelle Gruppeneinteilung kann noch kein regelkonformes K.-o.-Feld bilden.')
+    if (!isAdmin || state.groups.length === 0 || !activePlan) {
+      setNotice('Für die aktuelle Konfiguration kann noch keine K.O.-Phase erstellt werden.')
       return
     }
 
-    const bracket = createGlobalKnockoutBracket(
-      state.groups,
-      state.participants,
-      state.stats,
-      activePlan.qualifiersPerGroup,
-    )
-
+    const bracket = createGlobalKnockoutBracket(state.groups, state.participants, state.stats, activePlan.qualifiersPerGroup)
     if (bracket.qualifierIds.length !== activePlan.knockoutSize || bracket.rounds.length === 0) {
-      setNotice('Die K.-o.-Phase konnte nicht korrekt gesetzt werden. Bitte Gruppen neu auslosen.')
+      setNotice('K.O.-Phase konnte nicht gesetzt werden. Bitte Gruppen neu auslosen.')
       return
     }
 
     setState((current) => ({ ...current, knockoutBracket: bracket }))
-    setNotice(`${activePlan.knockoutSize} Spieler gesetzt · ${roundName(activePlan.knockoutSize, 0)} kann starten! ✦`)
+    setNotice(`${activePlan.knockoutSize} Spieler qualifiziert · ${roundName(activePlan.knockoutSize, 0)} gestartet.`)
   }
 
   function selectWinner(roundIndex: number, matchIndex: number, winnerId: string) {
-    setState((current) => {
-      if (!current.knockoutBracket) return current
-      return {
-        ...current,
-        knockoutBracket: updateBracketWinner(current.knockoutBracket, roundIndex, matchIndex, winnerId || null),
-      }
-    })
+    if (!isAdmin) return
+    setState((current) => ({
+      ...current,
+      knockoutBracket: current.knockoutBracket
+        ? updateBracketWinner(current.knockoutBracket, roundIndex, matchIndex, winnerId || null)
+        : null,
+    }))
   }
 
-  function resetTournament() {
-    if (!window.confirm('Wirklich alle Teilnehmer, Statistiken, Gruppen und K.-o.-Ergebnisse löschen?')) return
-    setState(DEFAULT_STATE)
-    setNewName('')
-    setBulkNames('')
-    localStorage.removeItem(STORAGE_KEY)
-    LEGACY_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key))
-    setNotice('Turnier wurde zurückgesetzt.')
+  async function refreshProfiles() {
+    if (!supabase || !isAdmin) return
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id,email,approved,role,created_at')
+      .order('created_at', { ascending: true })
+    if (error) {
+      setNotice(error.message)
+      return
+    }
+    setProfiles((data ?? []) as AccessProfile[])
+    setNotice('Zugriffsanfragen aktualisiert.')
+  }
+
+  async function approveProfile(profileId: string, approved: boolean) {
+    if (!supabase || !isAdmin) return
+    const { error } = await supabase
+      .from('profiles')
+      .update({ approved, role: approved ? 'admin' : 'viewer' })
+      .eq('id', profileId)
+    if (error) {
+      setNotice(error.message)
+      return
+    }
+    setProfiles((current) => current.map((item) => item.id === profileId ? { ...item, approved, role: approved ? 'admin' : 'viewer' } : item))
+    setNotice(approved ? 'Zugriff freigeschaltet.' : 'Admin-Zugriff entzogen.')
+  }
+
+  async function handleAuth(event: FormEvent) {
+    event.preventDefault()
+    if (!supabase) return
+    setAuthBusy(true)
+    try {
+      if (authMode === 'register') {
+        const redirectTo = `${window.location.origin}${window.location.pathname}`
+        const { error } = await supabase.auth.signUp({
+          email: email.trim(),
+          password,
+          options: { emailRedirectTo: redirectTo },
+        })
+        if (error) throw error
+        setNotice('Account angelegt. Prüfe ggf. deine E-Mail. Danach muss ein Admin deinen Zugriff freischalten.')
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
+        if (error) throw error
+        setShowLogin(false)
+        setNotice('Login erfolgreich. Berechtigungen werden geprüft …')
+      }
+      setPassword('')
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Login fehlgeschlagen.')
+    } finally {
+      setAuthBusy(false)
+    }
+  }
+
+  async function logout() {
+    await supabase?.auth.signOut()
+    setShowLogin(false)
+    setNotice('Abgemeldet.')
+  }
+
+  async function resetTournament() {
+    if (!supabase || !isAdmin) return
+    if (!window.confirm('Turnierdaten wirklich zurücksetzen? Die Teilnehmer-Anmeldungen bleiben erhalten.')) return
+    setState((current) => ({ ...DEFAULT_STATE, participants: current.participants }))
+    setNotice('Turnierdaten zurückgesetzt. Teilnehmer-Anmeldungen wurden behalten.')
+  }
+
+  function downloadJson() {
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `feelings-turnier-${new Date().toISOString().slice(0, 10)}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
   }
 
   async function importState(file: File | undefined) {
-    if (!file) return
+    if (!file || !isAdmin) return
     try {
       const parsed = JSON.parse(await file.text()) as Partial<TournamentState>
-      if (!Array.isArray(parsed.participants) || !Array.isArray(parsed.groups)) {
-        throw new Error('Ungültiges Format')
-      }
-      setState({
-        participants: parsed.participants,
+      if (!Array.isArray(parsed.groups)) throw new Error('Ungültiges Format')
+      setState((current) => ({
+        participants: current.participants,
         groupCount: Math.max(1, Math.min(10, Number(parsed.groupCount) || 1)),
-        groups: parsed.groups,
+        groups: parsed.groups ?? [],
         stats: parsed.stats ?? {},
         knockoutBracket: parsed.knockoutBracket ?? null,
-      })
-      setNotice('Turnierstand importiert. ♡')
+      }))
+      setNotice('Turnierstand importiert.')
     } catch {
-      setNotice('Import fehlgeschlagen: Datei ist kein gültiger Turnierstand.')
+      setNotice('Import fehlgeschlagen.')
     } finally {
       if (importRef.current) importRef.current.value = ''
     }
   }
 
-  function qualifierLabel(participantId: string | null): string | null {
-    if (!participantId || !state.knockoutBracket) return null
-    const qualifier = state.knockoutBracket.qualifiers.find((item) => item.participantId === participantId)
-    if (!qualifier) return null
-    return `${qualifier.groupRank}. · ${qualifier.groupName}`
-  }
-
   return (
     <div className="app-shell">
-      <header className="hero">
-        <div className="hero__noise" />
-        <div className="hero__sparkle hero__sparkle--one">✦</div>
-        <div className="hero__sparkle hero__sparkle--two">♡</div>
-        <div className="hero__content container">
-          <div className="hero__copy">
-            <div className="brand-lockup">
-              <span className="brand-lockup__mark">˚ʚ♡ɞ˚</span>
-              <span className="brand-lockup__text">brumefeelings community tournament</span>
-            </div>
-            <p className="eyebrow">VALORANT · 3 GAMES · GLOBAL KNOCKOUT</p>
-            <h1><span>Feelings</span><br />Turnier</h1>
-            <p className="hero__lead">
-              Erst die Gruppenphase, dann eine gemeinsame K.-o.-Stage. Die besten Seeds jeder Gruppe werden
-              automatisch gegen niedriger platzierte Spieler aus <strong>anderen Gruppen</strong> gesetzt.
-            </p>
-            <div className="hero__meta">
-              <span>♡ Top X automatisch</span>
-              <span>✦ max. Sechzehntelfinale</span>
-              <span>◉ Cross-Group Seeding</span>
-            </div>
-            <div className="hero__actions">
-              <a className="button button--twitch" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">
-                Twitch öffnen ↗
-              </a>
-              <button className="button button--ghost" onClick={() => downloadJson(state)}>Turnier exportieren</button>
-              <button className="button button--ghost" onClick={() => importRef.current?.click()}>Import</button>
-              <input
-                ref={importRef}
-                type="file"
-                accept="application/json,.json"
-                hidden
-                onChange={(event: ChangeEvent<HTMLInputElement>) => void importState(event.target.files?.[0])}
-              />
-            </div>
-          </div>
-
-          <div className="hero__visual" aria-hidden="true">
-            <div className="stream-frame">
-              <div className="stream-frame__top">
-                <span className="live-badge"><i /> LIVE</span>
-                <span>TWITCH // BRUMEFEELINGS</span>
-              </div>
-              <div className="stream-frame__screen">
-                <div className="scanline" />
-                <div className="stream-logo">
-                  <span>Brume</span>
-                  <small>feelings</small>
-                </div>
-                <div className="hud-corner hud-corner--tl" />
-                <div className="hud-corner hud-corner--br" />
-                <div className="crosshair"><span /><span /></div>
-              </div>
-              <div className="stream-frame__footer">
-                <div>
-                  <strong>FEELINGS // TOURNAMENT</strong>
-                  <span>VALORANT COMMUNITY BRACKET</span>
-                </div>
-                <span className="viewer-pill">● ONLINE</span>
-              </div>
-            </div>
-            <div className="chat-pop"><b>CHAT</b><span>ggs ♡</span><span>next match?</span></div>
+      <header className="topbar">
+        <div className="container topbar__inner">
+          <a className="brand" href="#top"><span className="brand__live">LIVE</span><span>FEELINGS//TOURNAMENT</span></a>
+          <div className="topbar__actions">
+            {isAdmin ? (
+              <>
+                <span className="access-pill access-pill--admin">ADMIN · {profile?.email}</span>
+                <button className="button button--ghost" onClick={() => void logout()}>Abmelden</button>
+              </>
+            ) : user ? (
+              <>
+                <span className="access-pill">FREISCHALTUNG AUSSTEHEND</span>
+                <button className="button button--ghost" onClick={() => void logout()}>Abmelden</button>
+              </>
+            ) : (
+              <button className="button button--twitch" onClick={() => setShowLogin(true)}>Admin Login</button>
+            )}
           </div>
         </div>
       </header>
 
-      <nav className="quick-nav" aria-label="Turnier-Navigation">
-        <div className="container quick-nav__inner">
-          <a href="#teilnehmer">01 Teilnehmer</a>
-          <a href="#gruppen">02 Gruppen</a>
-          <a href="#wertung">03 KDA</a>
-          <a href="#ko-phase">04 K.O.</a>
+      <header className="hero" id="top">
+        <div className="hero__grid" />
+        <div className="container hero__content">
+          <div className="hero__copy">
+            <p className="eyebrow">BRUME FEELINGS · COMMUNITY GAMING EVENT</p>
+            <h1>FEELINGS<br /><span>TURNIER</span></h1>
+            <p className="hero__lead">Drei KDA-Runden. Automatische Gruppen. Eine globale K.O.-Stage. Ein Champion.</p>
+            <div className="hero__tags"><span>VALORANT VIBES</span><span>STREAM MODE</span><span>KDA TRACKING</span></div>
+          </div>
+          <div className="stream-card" aria-hidden="true">
+            <div className="stream-card__bar"><span className="live-dot" /> LIVE NOW <span>brumefeelings</span></div>
+            <div className="stream-card__screen">
+              <div className="crosshair">+</div>
+              <div className="stream-wordmark">brume<span>feelings</span></div>
+              <div className="chat-bubble chat-bubble--one">♡ GLHF chat</div>
+              <div className="chat-bubble chat-bubble--two">!turnier</div>
+            </div>
+          </div>
         </div>
-      </nav>
+      </header>
 
       <main className="container main-grid">
         {notice && <div className="notice" role="status">{notice}</div>}
+        {!supabaseConfigured && <div className="setup-warning">Supabase ist noch nicht konfiguriert. Siehe README und <code>.env.example</code>.</div>}
 
-        <section className="panel panel--featured" id="teilnehmer">
+        <section className="panel registration-panel" id="teilnehmer">
           <div className="section-heading">
-            <div>
-              <span className="step">01</span>
-              <div>
-                <p className="section-kicker">ready, set, feelings ♡</p>
-                <h2>Teilnehmer</h2>
-              </div>
-            </div>
-            <span className="counter">{state.participants.length} gesamt</span>
-          </div>
-
-          <div className="participant-entry">
-            <div className="input-row">
-              <input
-                className="text-input"
-                value={newName}
-                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewName(event.target.value)}
-                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
-                  if (event.key === 'Enter') addSingleParticipant()
-                }}
-                placeholder="Name oder Gamer-Tag"
-                aria-label="Teilnehmername"
-              />
-              <button className="button" onClick={addSingleParticipant}>Hinzufügen ♡</button>
-            </div>
-
-            <details className="bulk-add">
-              <summary>Mehrere Teilnehmer auf einmal hinzufügen</summary>
-              <textarea
-                className="text-area"
-                value={bulkNames}
-                onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setBulkNames(event.target.value)}
-                placeholder={'Eine Person pro Zeile\nFeelingsOne\nFeelingsTwo\nFeelingsThree'}
-              />
-              <button className="button button--secondary" onClick={addBulkParticipants}>Liste übernehmen</button>
-            </details>
-          </div>
-
-          {state.participants.length === 0 ? (
-            <div className="empty-state">Noch keine Teilnehmer eingetragen. Die Lobby wartet ✦</div>
-          ) : (
-            <div className="chips">
-              {state.participants.map((participant, index) => (
-                <div className="chip" key={participant.id}>
-                  <span className="chip__index">{index + 1}</span>
-                  <span>{participant.name}</span>
-                  <button
-                    className="chip__remove"
-                    onClick={() => removeParticipant(participant.id)}
-                    aria-label={`${participant.name} entfernen`}
-                    title="Entfernen"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="panel" id="gruppen">
-          <div className="section-heading">
-            <div>
-              <span className="step">02</span>
-              <div>
-                <p className="section-kicker">group draw ✦</p>
-                <h2>Gruppen auslosen</h2>
-              </div>
-            </div>
-          </div>
-
-          <div className="group-controls">
-            <label className="field-label" htmlFor="group-count">Gewünschte Gruppen</label>
-            <select
-              id="group-count"
-              className="select-input"
-              value={state.groupCount}
-              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                setState((current) => ({
-                  ...current,
-                  groupCount: Number(event.target.value),
-                  knockoutBracket: null,
-                }))
-              }
-            >
-              {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
-                <option key={count} value={count}>{count}</option>
-              ))}
-            </select>
-            <button className="button" onClick={createGroups}>
-              {state.groups.length > 0 ? 'Neu auslosen' : 'Gruppen erstellen'}
-            </button>
-          </div>
-
-          <div className="plan-card">
-            <div className="plan-card__header">
-              <span className="plan-card__icon">◈</span>
-              <div>
-                <strong>Automatischer Turnierplan</strong>
-                <p>{planText(previewPlan)}</p>
-              </div>
-            </div>
-            {previewPlan && (
-              <div className="plan-metrics">
-                <PlanMetric label="Gruppen" value={previewPlan.groupCount} />
-                <PlanMetric label="Weiter je Gruppe" value={`Top ${previewPlan.qualifiersPerGroup}`} />
-                <PlanMetric label="K.O.-Feld" value={previewPlan.knockoutSize} />
-                <PlanMetric label="Start" value={roundName(previewPlan.knockoutSize, 0)} />
-              </div>
-            )}
-            {previewPlan?.adjusted && (
-              <p className="plan-card__adjustment">
-                ✦ {previewPlan.requestedGroupCount} Gruppen würden kein regelkonformes K.O.-Feld ergeben. Beim Auslosen werden deshalb automatisch {previewPlan.groupCount} Gruppen erstellt.
-              </p>
-            )}
+            <div><span className="step">01</span><h2>Teilnehmer</h2></div>
+            {isAdmin && <span className="counter">{state.participants.length} angemeldet</span>}
           </div>
 
           <p className="muted">
-            Ab 8 Teilnehmern ziehen pro Gruppe mindestens die Top 2 weiter, aber höchstens 50&nbsp;% der kleinsten Gruppe.
-            Bei 4–7 Teilnehmern greift die Sonderregel: immer 4 Spieler im K.O. – bei einer Gruppe Top 4, bei zwei Gruppen Top 2 je Gruppe.
+            {isAdmin
+              ? 'Als Admin siehst du alle Anmeldungen und kannst Teilnehmer verwalten.'
+              : 'Trage deinen Gamer-Tag ein. Die Namen bereits angemeldeter Personen sind nur für freigeschaltete Admins sichtbar.'}
           </p>
-        </section>
 
-        <section className="panel scoring-panel" id="wertung">
-          <div className="section-heading">
-            <div>
-              <span className="step">03</span>
-              <div>
-                <p className="section-kicker">three games · one ranking</p>
-                <h2>KDA-Punktesystem</h2>
+          <div className="input-row participant-submit">
+            <input
+              className="text-input"
+              value={newName}
+              onChange={(event) => setNewName(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') void addSingleParticipant() }}
+              placeholder="Name oder Gamer-Tag"
+              maxLength={40}
+            />
+            <button className="button" onClick={() => void addSingleParticipant()}>Für Turnier anmelden</button>
+          </div>
+
+          {isAdmin && (
+            <>
+              <details className="bulk-add">
+                <summary>Mehrere Teilnehmer hinzufügen</summary>
+                <textarea className="text-area" value={bulkNames} onChange={(event) => setBulkNames(event.target.value)} placeholder="Eine Person pro Zeile" />
+                <button className="button button--secondary" onClick={() => void addBulkParticipants()}>Liste übernehmen</button>
+              </details>
+              <div className="admin-toolbar">
+                <button className="button button--ghost" onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button>
               </div>
-            </div>
-          </div>
-          <div className="score-rules">
-            <div className="rule"><strong>+1</strong><span>pro Kill</span></div>
-            <div className="rule"><strong>+1</strong><span>pro Assist</span></div>
-            <div className="rule rule--negative"><strong>−1,5</strong><span>pro Death</span></div>
-            <div className="rule"><strong>+3</strong><span>wenn Kills + Assists &gt; Deaths</span></div>
-            <div className="rule rule--negative"><strong>−3</strong><span>wenn Kills + Assists &lt; Deaths</span></div>
-          </div>
-          <p className="formula">Rundenpunkte = K + A − 1,5 × D + Bonus/Malus · Bei K + A = D gibt es keinen Zusatz.</p>
+              <div className="chips">
+                {state.participants.map((participant, index) => (
+                  <div className="chip" key={participant.id}>
+                    <span className="chip__index">{index + 1}</span><span>{participant.name}</span>
+                    <button className="chip__remove" onClick={() => void removeParticipant(participant.id)} aria-label={`${participant.name} entfernen`}>×</button>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </section>
 
-        {state.groups.length === 0 ? (
-          <section className="panel empty-state empty-state--large">
-            Erstelle zuerst Gruppen. Danach erscheinen hier die drei KDA-Spiele, Ranglisten und die gemeinsame K.-o.-Phase.
+        <section className="panel scoring-panel">
+          <div className="section-heading"><div><span className="step">02</span><h2>KDA-Wertung</h2></div></div>
+          <div className="score-rules">
+            <div className="rule"><strong>+1</strong><span>Kill</span></div>
+            <div className="rule"><strong>+1</strong><span>Assist</span></div>
+            <div className="rule rule--negative"><strong>−1,5</strong><span>Death</span></div>
+            <div className="rule"><strong>+3</strong><span>K + A &gt; D</span></div>
+            <div className="rule rule--negative"><strong>−3</strong><span>K + A &lt; D</span></div>
+          </div>
+        </section>
+
+        {!isAdmin ? (
+          <section className="panel locked-panel">
+            <div className="lock-icon">⌁</div>
+            <div>
+              <p className="eyebrow">ADMIN CHANNEL</p>
+              <h2>Turniersteuerung geschützt</h2>
+              <p className="muted">Gruppen, Ranglisten, Teilnehmernamen, KDA-Eingaben und K.O.-Matches sind nur für freigeschaltete Accounts sichtbar.</p>
+              {user && !profile?.approved && <p className="pending-note">Dein Account ist angemeldet, wartet aber noch auf Freischaltung.</p>}
+            </div>
           </section>
         ) : (
           <>
+            <section className="panel" id="gruppen">
+              <div className="section-heading"><div><span className="step">03</span><h2>Gruppen-Setup</h2></div></div>
+              <div className="group-controls">
+                <label className="field-label" htmlFor="group-count">Gewünschte Gruppen</label>
+                <select id="group-count" className="select-input" value={state.groupCount} onChange={(event) => setState((current) => ({ ...current, groupCount: Number(event.target.value), knockoutBracket: null }))}>
+                  {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}
+                </select>
+                <button className="button" onClick={createGroups}>Gruppen automatisch erstellen</button>
+              </div>
+              <div className="plan-card"><span>AUTO PLAN</span><strong>{planText(previewPlan)}</strong></div>
+            </section>
+
             {state.groups.map((group) => {
               const standings = buildStandings(group, state.participants, state.stats)
-              const qualifiedCount = activePlan?.qualifiersPerGroup ?? 0
-
+              const qualified = activePlan?.qualifiersPerGroup ?? 0
               return (
                 <section className="panel group-panel" key={group.id}>
-                  <div className="section-heading group-title-row">
-                    <div>
-                      <span className="group-letter">{group.name.replace('Gruppe ', '')}</span>
-                      <div>
-                        <p className="section-kicker">{group.name}</p>
-                        <h2>{group.participantIds.length} Spieler</h2>
-                      </div>
-                    </div>
-                    {qualifiedCount > 0 && <div className="qualification-badge">Top {qualifiedCount} → K.O.</div>}
+                  <div className="section-heading"><div><span className="step">{group.name}</span><h2>{group.participantIds.length} Spieler</h2></div></div>
+                  <h3>3 KDA-Spiele</h3>
+                  <div className="stats-wrap">
+                    <table className="stats-table">
+                      <thead><tr><th>Spieler</th>{[1,2,3].flatMap((round) => [<th key={`${round}k`}>S{round} K</th>,<th key={`${round}a`}>A</th>,<th key={`${round}d`}>D</th>,<th key={`${round}p`}>Pkt.</th>])}<th>Gesamt</th></tr></thead>
+                      <tbody>
+                        {group.participantIds.map((participantId) => {
+                          const participantStats = state.stats[participantId] ?? emptyParticipantStats()
+                          const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round), 0)
+                          return <tr key={participantId}>
+                            <th className="player-cell">{participantMap.get(participantId)?.name ?? 'Unbekannt'}</th>
+                            {participantStats.rounds.flatMap((round, roundIndex) => [
+                              <td key={`${roundIndex}k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,
+                              <td key={`${roundIndex}a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,
+                              <td key={`${roundIndex}d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,
+                              <td className={calculateRoundScore(round) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round))}</td>,
+                            ])}
+                            <td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td>
+                          </tr>
+                        })}
+                      </tbody>
+                    </table>
                   </div>
-
-                  {group.participantIds.length === 0 ? (
-                    <div className="empty-state">Diese Gruppe ist leer.</div>
-                  ) : (
-                    <>
-                      <h3>Gruppenphase · 3 Spiele</h3>
-                      <div className="stats-wrap">
-                        <table className="stats-table">
-                          <thead>
-                            <tr>
-                              <th rowSpan={2}>Spieler</th>
-                              {[1, 2, 3].map((round) => <th colSpan={4} key={round}>Game {round}</th>)}
-                              <th rowSpan={2}>Gesamt</th>
-                            </tr>
-                            <tr>
-                              {[1, 2, 3].flatMap((round) => [
-                                <th key={`${round}-k`}>K</th>,
-                                <th key={`${round}-a`}>A</th>,
-                                <th key={`${round}-d`}>D</th>,
-                                <th key={`${round}-p`}>Pkt.</th>,
-                              ])}
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {group.participantIds.map((participantId) => {
-                              const participant = participantMap.get(participantId)
-                              const participantStats = state.stats[participantId] ?? emptyParticipantStats()
-                              const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round), 0)
-                              return (
-                                <tr key={participantId}>
-                                  <th className="player-cell">{participant?.name ?? 'Unbekannt'}</th>
-                                  {participantStats.rounds.flatMap((round, roundIndex) => [
-                                    <td key={`${participantId}-${roundIndex}-k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,
-                                    <td key={`${participantId}-${roundIndex}-a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,
-                                    <td key={`${participantId}-${roundIndex}-d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,
-                                    <td className={calculateRoundScore(round) < 0 ? 'points points--negative' : 'points'} key={`${participantId}-${roundIndex}-p`}>
-                                      {formatPoints(calculateRoundScore(round))}
-                                    </td>,
-                                  ])}
-                                  <td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td>
-                                </tr>
-                              )
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-
-                      <div className="standings-section">
-                        <div className="subheading-row">
-                          <div>
-                            <h3>Rangliste</h3>
-                            <p className="muted">
-                              {qualifiedCount > 0
-                                ? `Die Top ${qualifiedCount} sind aktuell für die gemeinsame K.-o.-Phase qualifiziert.`
-                                : 'Für die aktuelle Gruppenkonstellation ist keine regelkonforme K.-o.-Phase möglich.'}
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="standings-list">
-                          {standings.map((row, index) => (
-                            <div className={`standing ${index < qualifiedCount ? 'standing--qualified' : ''}`} key={row.participantId}>
-                              <span className="standing__rank">{index + 1}</span>
-                              <strong>{row.name}</strong>
-                              <span className="standing__kda">{row.kills} K · {row.assists} A · {row.deaths} D</span>
-                              <span className={row.totalPoints < 0 ? 'standing__points standing__points--negative' : 'standing__points'}>
-                                {formatPoints(row.totalPoints)} Pkt.
-                              </span>
-                              {index < qualifiedCount && <span className="qualified-tag">Q</span>}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </>
-                  )}
+                  <div className="standings-list">
+                    {standings.map((row, index) => <div className={`standing ${index < qualified ? 'standing--qualified' : ''}`} key={row.participantId}>
+                      <span className="standing__rank">{index + 1}</span><strong>{row.name}</strong><span className="standing__kda">{row.kills} K · {row.assists} A · {row.deaths} D</span><span className="standing__points">{formatPoints(row.totalPoints)} Pkt.</span>{index < qualified && <span className="qualified-tag">Q</span>}
+                    </div>)}
+                  </div>
                 </section>
               )
             })}
 
-            <section className="panel knockout-panel" id="ko-phase">
-              <div className="knockout-panel__glow" />
-              <div className="section-heading knockout-heading">
-                <div>
-                  <span className="step">04</span>
-                  <div>
-                    <p className="section-kicker">now it gets serious ✦</p>
-                    <h2>Gemeinsame K.-o.-Phase</h2>
-                  </div>
+            {state.groups.length > 0 && (
+              <section className="panel ko-panel">
+                <div className="section-heading">
+                  <div><span className="step">04</span><h2>Globale K.O.-Phase</h2></div>
+                  {championId && <span className="champion-badge">CHAMPION · {participantMap.get(championId)?.name}</span>}
                 </div>
-                {activePlan && <span className="counter counter--accent">{activePlan.knockoutSize} Plätze</span>}
-              </div>
+                <p className="muted">{planText(activePlan)}. Bei mehreren Gruppen werden die Qualifikanten in Runde 1 gruppenübergreifend gesetzt.</p>
+                <button className="button button--twitch" onClick={generateGlobalBracket}>{state.knockoutBracket ? 'K.O.-Phase neu setzen' : 'Gruppenphase abschließen → K.O. starten'}</button>
 
-              {activePlan ? (
-                <>
-                  <div className="ko-explainer">
-                    <div>
-                      <strong>{roundName(activePlan.knockoutSize, 0)}</strong>
-                      <span>Start-Runde</span>
-                    </div>
-                    <div>
-                      <strong>Top {activePlan.qualifiersPerGroup}</strong>
-                      <span>pro Gruppe</span>
-                    </div>
-                    <div>
-                      <strong>{activePlan.smallTournamentException ? '4 FIX' : '≤ 50 %'}</strong>
-                      <span>{activePlan.smallTournamentException ? 'Sonderregel bei < 8' : 'der kleinsten Gruppe'}</span>
-                    </div>
-                    <div>
-                      <strong>{activePlan.groupCount > 1 ? 'Cross-Group' : 'Seeded'}</strong>
-                      <span>{activePlan.groupCount > 1 ? 'Seeds aus anderen Gruppen' : '1 vs 4 · 2 vs 3'}</span>
-                    </div>
-                  </div>
-
-                  <div className="ko-action-row">
-                    <div>
-                      <h3>Setzliste aus der Gruppenphase</h3>
-                      <p className="muted">
-                        Bei mehreren Gruppen gilt: Gruppenerste treffen auf niedriger gesetzte Spieler aus anderen Gruppen.
-                        Bei Top 2 ist das exakt #1 gegen #2 einer anderen Gruppe. Bei nur einer Gruppe (Sonderregel unter 8)
-                        wird #1 gegen #4 und #2 gegen #3 gesetzt.
-                      </p>
-                    </div>
-                    <button className="button button--ko" onClick={generateGlobalBracket}>
-                      {state.knockoutBracket ? 'K.O. aus Ranglisten neu setzen' : 'Gruppenphase abschließen → K.O. starten'}
-                    </button>
-                  </div>
-
-                  <div className="qualified-overview">
-                    {state.groups.map((group) => {
-                      const standings = buildStandings(group, state.participants, state.stats).slice(0, activePlan.qualifiersPerGroup)
-                      return (
-                        <div className="qualified-group" key={`qualified-${group.id}`}>
-                          <span>{group.name}</span>
-                          {standings.map((row, index) => (
-                            <div key={row.participantId}>
-                              <b>{index + 1}.</b> {row.name}
-                            </div>
-                          ))}
-                        </div>
-                      )
-                    })}
-                  </div>
-
-                  {championId && (
-                    <div className="champion-card">
-                      <span>˚ʚ♡ɞ˚</span>
-                      <p>Feelings Champion</p>
-                      <strong>{participantMap.get(championId)?.name ?? 'Sieger'}</strong>
-                      <small>ggs ♡</small>
-                    </div>
-                  )}
-
-                  {state.knockoutBracket && state.knockoutBracket.rounds.length > 0 && (
-                    <div className="bracket-section">
-                      <div className="bracket">
-                        {state.knockoutBracket.rounds.map((round, roundIndex) => (
-                          <div className="bracket-round" key={`ko-round-${roundIndex}`}>
-                            <div className="round-title">
-                              <span>✦</span>
-                              <h4>{roundName(state.knockoutBracket?.qualifierIds.length ?? 0, roundIndex)}</h4>
-                            </div>
-                            <div className="round-matches">
-                              {round.map((match, matchIndex) => {
-                                const player1 = match.player1Id ? participantMap.get(match.player1Id)?.name : null
-                                const player2 = match.player2Id ? participantMap.get(match.player2Id)?.name : null
-                                const ready = Boolean(match.player1Id && match.player2Id)
-                                return (
-                                  <div className="match-card" key={match.id}>
-                                    <span className="match-number">Match {matchIndex + 1}</span>
-                                    <div className={match.winnerId === match.player1Id ? 'match-player match-player--winner' : 'match-player'}>
-                                      <span className="match-player__name">{player1 ?? 'Wartet auf Sieger …'}</span>
-                                      {match.player1Id && <small>{qualifierLabel(match.player1Id)}</small>}
-                                    </div>
-                                    <div className="versus">vs</div>
-                                    <div className={match.winnerId === match.player2Id ? 'match-player match-player--winner' : 'match-player'}>
-                                      <span className="match-player__name">{player2 ?? 'Wartet auf Sieger …'}</span>
-                                      {match.player2Id && <small>{qualifierLabel(match.player2Id)}</small>}
-                                    </div>
-                                    <label className="winner-select-label">
-                                      Sieger
-                                      <select
-                                        className="winner-select"
-                                        disabled={!ready}
-                                        value={match.winnerId ?? ''}
-                                        onChange={(event: ChangeEvent<HTMLSelectElement>) => selectWinner(roundIndex, matchIndex, event.target.value)}
-                                      >
-                                        <option value="">– auswählen –</option>
-                                        {match.player1Id && <option value={match.player1Id}>{player1}</option>}
-                                        {match.player2Id && <option value={match.player2Id}>{player2}</option>}
-                                      </select>
-                                    </label>
-                                  </div>
-                                )
-                              })}
-                            </div>
-                          </div>
-                        ))}
+                {state.knockoutBracket && <div className="bracket">
+                  {state.knockoutBracket.rounds.map((round, roundIndex) => <div className="bracket-round" key={roundIndex}>
+                    <h4>{roundName(state.knockoutBracket!.qualifierIds.length, roundIndex)}</h4>
+                    <div className="round-matches">{round.map((match, matchIndex) => {
+                      const player1 = match.player1Id ? participantMap.get(match.player1Id)?.name : null
+                      const player2 = match.player2Id ? participantMap.get(match.player2Id)?.name : null
+                      return <div className="match-card" key={match.id}>
+                        <span className="match-number">MATCH {matchIndex + 1}</span>
+                        <div className={match.winnerId === match.player1Id ? 'match-player match-player--winner' : 'match-player'}>{player1 ?? 'TBD'}</div>
+                        <div className={match.winnerId === match.player2Id ? 'match-player match-player--winner' : 'match-player'}>{player2 ?? 'TBD'}</div>
+                        <select className="winner-select" disabled={!match.player1Id || !match.player2Id} value={match.winnerId ?? ''} onChange={(event) => selectWinner(roundIndex, matchIndex, event.target.value)}>
+                          <option value="">Sieger wählen</option>
+                          {match.player1Id && <option value={match.player1Id}>{player1}</option>}
+                          {match.player2Id && <option value={match.player2Id}>{player2}</option>}
+                        </select>
                       </div>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="empty-state">
-                  Für eine K.-o.-Phase werden mindestens 4 Teilnehmer benötigt. Ab 8 Teilnehmern wird für gruppenübergreifende Matches automatisch eine passende Mehrgruppen-Konstellation gewählt.
-                </div>
-              )}
+                    })}</div>
+                  </div>)}
+                </div>}
+              </section>
+            )}
+
+            <section className="panel access-panel">
+              <div className="section-heading"><div><span className="step">ADMIN</span><h2>Zugriffsfreigaben</h2></div></div>
+              <p className="muted">Registrierte Accounts erhalten erst nach deiner Freigabe Bearbeitungsrechte und Zugriff auf Teilnehmernamen.</p>
+              <div className="admin-toolbar"><button className="button button--ghost" onClick={() => void refreshProfiles()}>Zugriffsanfragen aktualisieren</button></div>
+              <div className="access-list">
+                {profiles.map((item) => <div className="access-row" key={item.id}>
+                  <div><strong>{item.email}</strong><span>{item.approved && item.role === 'admin' ? 'Freigeschaltet' : 'Wartet auf Freischaltung'}</span></div>
+                  <div className="access-row__actions">
+                    {item.approved ? <button className="button button--danger" disabled={item.id === user?.id} onClick={() => void approveProfile(item.id, false)}>Zugriff entziehen</button> : <button className="button" onClick={() => void approveProfile(item.id, true)}>Freischalten</button>}
+                  </div>
+                </div>)}
+              </div>
+            </section>
+
+            <section className="panel admin-tools">
+              <div><h2>Admin Tools</h2><p className="muted">Turnierstand exportieren/importieren oder Turnierdaten zurücksetzen.</p></div>
+              <div className="admin-tools__actions">
+                <button className="button button--ghost" onClick={downloadJson}>Export</button>
+                <button className="button button--ghost" onClick={() => importRef.current?.click()}>Import</button>
+                <input ref={importRef} type="file" accept="application/json,.json" hidden onChange={(event) => void importState(event.target.files?.[0])} />
+                <button className="button button--danger" onClick={() => void resetTournament()}>Turnier zurücksetzen</button>
+              </div>
             </section>
           </>
         )}
-
-        <section className="panel danger-panel">
-          <div>
-            <p className="section-kicker">fresh start</p>
-            <h2>Turnier zurücksetzen</h2>
-            <p className="muted">Löscht alle lokal gespeicherten Teilnehmer, Statistiken, Gruppen und K.-o.-Ergebnisse.</p>
-          </div>
-          <button className="button button--danger" onClick={resetTournament}>Alles löschen</button>
-        </section>
       </main>
 
-      <footer className="footer">
-        <div className="container footer__inner">
-          <span>FEELINGS // TOURNAMENT</span>
-          <span>Daten bleiben lokal in diesem Browser.</span>
-        </div>
-      </footer>
-    </div>
-  )
-}
+      <footer className="footer"><div className="container">FEELINGS//TOURNAMENT · secure admin mode · powered by Supabase</div></footer>
 
-function PlanMetric({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="plan-metric">
-      <strong>{value}</strong>
-      <span>{label}</span>
+      {showLogin && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false) }}>
+        <div className="auth-modal">
+          <button className="modal-close" onClick={() => setShowLogin(false)}>×</button>
+          <p className="eyebrow">SECURE ACCESS</p>
+          <h2>{authMode === 'login' ? 'Admin Login' : 'Account registrieren'}</h2>
+          <p className="muted">Neue Accounts sind zunächst gesperrt und müssen von einem freigeschalteten Admin bestätigt werden.</p>
+          <form className="auth-form" onSubmit={(event) => void handleAuth(event)}>
+            <label>E-Mail<input className="text-input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+            <label>Passwort<input className="text-input" type="password" minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+            <button className="button button--twitch" disabled={authBusy || authLoading}>{authBusy ? 'Bitte warten …' : authMode === 'login' ? 'Einloggen' : 'Registrieren'}</button>
+          </form>
+          <button className="auth-switch" onClick={() => setAuthMode((mode) => mode === 'login' ? 'register' : 'login')}>
+            {authMode === 'login' ? 'Noch keinen Account? Registrieren' : 'Bereits registriert? Zum Login'}
+          </button>
+        </div>
+      </div>}
     </div>
   )
 }
 
 function StatInput({ value, onChange }: { value: number; onChange: (value: string) => void }) {
-  return (
-    <input
-      className="stat-input"
-      type="number"
-      min="0"
-      step="1"
-      inputMode="numeric"
-      value={value}
-      onChange={(event: ChangeEvent<HTMLInputElement>) => onChange(event.target.value)}
-    />
-  )
+  return <input className="stat-input" type="number" min="0" step="1" inputMode="numeric" value={value} onChange={(event) => onChange(event.target.value)} />
 }
 
 export default App

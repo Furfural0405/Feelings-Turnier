@@ -1,24 +1,32 @@
-FEELINGS TURNIER – EMAIL ADMIN PATCH
-====================================
+FEELINGS-TURNIER – ERSTELLER-ADMIN + ZUGRIFFSANFRAGEN FIX
 
-ERSETZEN:
-- package.json
-- .github/workflows/static.yml
+Die produktive Supabase-Datenbank wurde bereits angepasst.
+Du musst supabase/setup.sql NICHT manuell ausführen. Die Datei hält das Repository nur synchron.
+
+ERSTELLER / OWNER:
+- turnier.admin@gmx.de
+- Nur dieser Account darf andere Admins freischalten, ablehnen oder ihnen den Zugriff entziehen.
+- Andere freigeschaltete Admins können weiterhin Turnier-/Webseiteninhalte bearbeiten, aber keine Adminrechte vergeben.
+
+FÜR GITHUB ERSETZEN:
 - src/App.tsx
-- src/styles.css
 - src/types.ts
-- src/lib/tournament.ts
-- index.html
-- public/favicon.svg
-
-NEU HINZUFÜGEN:
-- src/lib/supabase.ts
-- src/vite-env.d.ts
-- .env.example
 - supabase/setup.sql
 
-Danach Supabase einrichten (README beachten) und in GitHub Repository Variables setzen:
-- VITE_SUPABASE_URL
-- VITE_SUPABASE_PUBLISHABLE_KEY
+Die übrigen Dateien im ZIP sind die zuletzt verwendete kumulative Version und können unverändert mit hochgeladen werden.
 
-Wichtig: NIEMALS einen Supabase service_role Key in GitHub Pages verwenden.
+NEU IN DER WEBSEITE:
+- Der Bereich „Admin-Zugriffsanfragen“ ist nur für turnier.admin@gmx.de sichtbar.
+- Status: Wartet / Freigeschaltet / Abgelehnt.
+- Aktionen: Freischalten / Ablehnen / Zugriff entziehen.
+- Erfolgreiche Neuregistrierungen werden für den Ersteller automatisch alle 10 Sekunden und beim Fokuswechsel aktualisiert.
+- Manuelles „Jetzt aktualisieren“ bleibt möglich.
+- Signup-Fehler durch das Supabase-E-Mail-Limit (HTTP 429) werden verständlich angezeigt.
+
+WICHTIG ZUR NEUREGISTRIERUNG:
+Der aktuell verwendete Supabase-Standard-Maildienst ist stark limitiert. Beim Test mit animargus@gmx.net wurde der Signup mit
+„email rate limit exceeded“ abgelehnt; deshalb wurde kein Account angelegt und es konnte keine Anfrage erscheinen.
+Für zuverlässige öffentliche Registrierungen sollte in Supabase ein eigener SMTP-Dienst eingerichtet werden:
+Authentication -> Emails / SMTP Settings.
+
+Danach die drei geänderten Dateien committen. GitHub Actions baut und veröffentlicht die Seite automatisch.

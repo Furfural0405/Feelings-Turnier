@@ -84,5 +84,7 @@ export type AccessProfile = {
   email: string
   approved: boolean
   role: 'viewer' | 'admin'
+  is_creator: boolean
+  access_status: 'pending' | 'approved' | 'rejected'
   created_at: string
 }

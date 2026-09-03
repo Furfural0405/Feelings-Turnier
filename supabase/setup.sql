@@ -1,5 +1,6 @@
 -- Referenz-Setup für Feelings-Turnier.
--- Enthält zusätzlich öffentliche Header-Einstellungen, die nur Admins ändern dürfen.
+-- Ersteller/Admin: turnier.admin@gmx.de
+-- Nur dieser Ersteller darf Admin-Zugriffe freischalten oder ablehnen.
 
 create extension if not exists pgcrypto;
 create schema if not exists private;
@@ -9,8 +10,16 @@ create table if not exists public.profiles (
   email text not null,
   approved boolean not null default false,
   role text not null default 'viewer' check (role in ('viewer', 'admin')),
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  is_creator boolean not null default false,
+  access_status text not null default 'pending' check (access_status in ('pending', 'approved', 'rejected'))
 );
+
+alter table public.profiles add column if not exists is_creator boolean not null default false;
+alter table public.profiles add column if not exists access_status text not null default 'pending';
+
+alter table public.profiles drop constraint if exists profiles_access_status_check;
+alter table public.profiles add constraint profiles_access_status_check check (access_status in ('pending', 'approved', 'rejected'));
 
 create table if not exists public.participants (
   id uuid primary key default gen_random_uuid(),
@@ -33,8 +42,8 @@ insert into public.tournament_state (id, payload) values (1, '{}'::jsonb) on con
 create or replace function public.handle_new_user()
 returns trigger language plpgsql security definer set search_path = public as $$
 begin
-  insert into public.profiles (id, email, approved, role)
-  values (new.id, coalesce(new.email, ''), false, 'viewer')
+  insert into public.profiles (id, email, approved, role, is_creator, access_status)
+  values (new.id, coalesce(new.email, ''), false, 'viewer', false, 'pending')
   on conflict (id) do update set email = excluded.email;
   return new;
 end;
@@ -44,6 +53,23 @@ revoke all on function public.handle_new_user() from public, anon, authenticated
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created after insert or update of email on auth.users for each row execute procedure public.handle_new_user();
 
+-- Sicherheitshalber fehlende Profile bestehender Auth-Nutzer nachziehen.
+insert into public.profiles (id, email, approved, role, is_creator, access_status)
+select u.id, coalesce(u.email, ''), false, 'viewer', false, 'pending'
+from auth.users u
+left join public.profiles p on p.id = u.id
+where p.id is null;
+
+-- Bestehende freigeschaltete Accounts als approved markieren.
+update public.profiles
+set access_status = case when approved then 'approved' else access_status end;
+
+-- Genau dieser Account ist der Ersteller und kann nicht über die Web-App demotet werden.
+update public.profiles set is_creator = false;
+update public.profiles
+set is_creator = true, approved = true, role = 'admin', access_status = 'approved'
+where lower(email) = lower('turnier.admin@gmx.de');
+
 create or replace function private.is_approved_admin()
 returns boolean language sql stable security definer set search_path = '' as $$
   select exists (
@@ -52,10 +78,30 @@ returns boolean language sql stable security definer set search_path = '' as $$
   );
 $$;
 
+create or replace function private.is_creator_admin()
+returns boolean language sql stable security definer set search_path = '' as $$
+  select exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid()
+      and p.approved = true
+      and p.role = 'admin'
+      and p.is_creator = true
+      and lower(p.email) = lower('turnier.admin@gmx.de')
+  );
+$$;
+
 revoke all on schema private from public, anon;
 grant usage on schema private to authenticated;
 revoke all on function private.is_approved_admin() from public, anon;
+revoke all on function private.is_creator_admin() from public, anon;
 grant execute on function private.is_approved_admin() to authenticated;
+grant execute on function private.is_creator_admin() to authenticated;
+
+-- Alte Management-Hilfen entfernen, falls eine frühere Version sie angelegt hat.
+drop policy if exists "owner read profiles" on public.profiles;
+drop policy if exists "owner update profiles" on public.profiles;
+drop function if exists private.can_manage_admins();
+alter table public.profiles drop column if exists can_manage_admins;
 
 alter table public.profiles enable row level security;
 alter table public.participants enable row level security;
@@ -65,7 +111,8 @@ revoke all on table public.profiles from anon, authenticated;
 revoke all on table public.participants from anon, authenticated;
 revoke all on table public.tournament_state from anon, authenticated;
 
-grant select, update on table public.profiles to authenticated;
+grant select on table public.profiles to authenticated;
+grant update (approved, role, access_status) on public.profiles to authenticated;
 grant insert on table public.participants to anon, authenticated;
 grant select, update, delete on table public.participants to authenticated;
 grant select, insert, update on table public.tournament_state to authenticated;
@@ -73,26 +120,35 @@ grant select, insert, update on table public.tournament_state to authenticated;
 drop policy if exists "profile self read" on public.profiles;
 drop policy if exists "admin read profiles" on public.profiles;
 drop policy if exists "admin update profiles" on public.profiles;
+drop policy if exists "creator read profiles" on public.profiles;
+drop policy if exists "creator update profiles" on public.profiles;
+
+create policy "profile self read" on public.profiles for select to authenticated
+using ((select auth.uid()) = id);
+create policy "creator read profiles" on public.profiles for select to authenticated
+using ((select private.is_creator_admin()));
+create policy "creator update profiles" on public.profiles for update to authenticated
+using ((select private.is_creator_admin()) and is_creator = false)
+with check ((select private.is_creator_admin()) and is_creator = false);
+
 drop policy if exists "public participant signup" on public.participants;
 drop policy if exists "admin read participants" on public.participants;
 drop policy if exists "admin update participants" on public.participants;
 drop policy if exists "admin delete participants" on public.participants;
-drop policy if exists "admin read tournament state" on public.tournament_state;
-drop policy if exists "admin insert tournament state" on public.tournament_state;
-drop policy if exists "admin update tournament state" on public.tournament_state;
-
-create policy "profile self read" on public.profiles for select to authenticated using ((select auth.uid()) = id);
-create policy "admin read profiles" on public.profiles for select to authenticated using ((select private.is_approved_admin()));
-create policy "admin update profiles" on public.profiles for update to authenticated using ((select private.is_approved_admin())) with check ((select private.is_approved_admin()));
-create policy "public participant signup" on public.participants for insert to anon, authenticated with check (char_length(trim(name)) between 2 and 40 and (submitted_by is null or submitted_by = (select auth.uid())));
+create policy "public participant signup" on public.participants for insert to anon, authenticated
+with check (char_length(trim(name)) between 2 and 40 and (submitted_by is null or submitted_by = (select auth.uid())));
 create policy "admin read participants" on public.participants for select to authenticated using ((select private.is_approved_admin()));
 create policy "admin update participants" on public.participants for update to authenticated using ((select private.is_approved_admin())) with check ((select private.is_approved_admin()));
 create policy "admin delete participants" on public.participants for delete to authenticated using ((select private.is_approved_admin()));
+
+drop policy if exists "admin read tournament state" on public.tournament_state;
+drop policy if exists "admin insert tournament state" on public.tournament_state;
+drop policy if exists "admin update tournament state" on public.tournament_state;
 create policy "admin read tournament state" on public.tournament_state for select to authenticated using ((select private.is_approved_admin()));
 create policy "admin insert tournament state" on public.tournament_state for insert to authenticated with check ((select private.is_approved_admin()) and id = 1);
 create policy "admin update tournament state" on public.tournament_state for update to authenticated using ((select private.is_approved_admin())) with check ((select private.is_approved_admin()) and id = 1);
 
--- Öffentliche Header-Inhalte: jeder darf lesen, nur freigeschaltete Admins dürfen schreiben.
+-- Öffentliche Header-Inhalte: jeder darf lesen, freigeschaltete Admins dürfen schreiben.
 create table if not exists public.site_settings (
   id smallint primary key check (id = 1),
   hero jsonb not null default jsonb_build_object(

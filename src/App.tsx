@@ -114,6 +114,7 @@ function App() {
   const saveTimer = useRef<number | null>(null)
 
   const isAdmin = Boolean(profile?.approved && profile.role === 'admin')
+  const isCreator = Boolean(isAdmin && profile?.is_creator)
   const participantMap = useMemo(
     () => new Map(state.participants.map((participant) => [participant.id, participant])),
     [state.participants],
@@ -188,7 +189,7 @@ function App() {
     async function loadProfile() {
       const { data, error } = await supabase!
         .from('profiles')
-        .select('id,email,approved,role,created_at')
+        .select('id,email,approved,role,is_creator,access_status,created_at')
         .eq('id', user!.id)
         .maybeSingle()
       if (cancelled) return
@@ -203,6 +204,20 @@ function App() {
   }, [user])
 
   useEffect(() => {
+    if (!isCreator) return
+
+    void refreshProfiles(true)
+    const interval = window.setInterval(() => void refreshProfiles(true), 10000)
+    const onFocus = () => void refreshProfiles(true)
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [isCreator])
+
+  useEffect(() => {
     if (!supabase || !isAdmin) {
       setAdminDataLoaded(false)
       return
@@ -213,7 +228,7 @@ function App() {
       const [participantResult, stateResult, profileResult] = await Promise.all([
         supabase!.from('participants').select('id,name').order('created_at', { ascending: true }),
         supabase!.from('tournament_state').select('payload').eq('id', 1).maybeSingle(),
-        supabase!.from('profiles').select('id,email,approved,role,created_at').order('created_at', { ascending: true }),
+        supabase!.from('profiles').select('id,email,approved,role,is_creator,access_status,created_at').order('created_at', { ascending: true }),
       ])
       if (cancelled) return
       if (participantResult.error || stateResult.error || profileResult.error) {
@@ -452,20 +467,34 @@ function App() {
     })
   }
 
-  async function refreshProfiles() {
-    if (!supabase || !isAdmin) return
-    const { data, error } = await supabase.from('profiles').select('id,email,approved,role,created_at').order('created_at', { ascending: true })
-    if (error) { setNotice(error.message); return }
+  async function refreshProfiles(silent = false) {
+    if (!supabase || !isCreator) return
+    const { data, error } = await supabase.from('profiles').select('id,email,approved,role,is_creator,access_status,created_at').order('created_at', { ascending: true })
+    if (error) {
+      if (!silent) setNotice(`Zugriffsanfragen konnten nicht geladen werden: ${error.message}`)
+      return
+    }
     setProfiles((data ?? []) as AccessProfile[])
-    setNotice('Zugriffsanfragen aktualisiert.')
+    if (!silent) setNotice('Zugriffsanfragen aktualisiert.')
   }
 
-  async function approveProfile(profileId: string, approved: boolean) {
-    if (!supabase || !isAdmin) return
-    const { error } = await supabase.from('profiles').update({ approved, role: approved ? 'admin' : 'viewer' }).eq('id', profileId)
-    if (error) { setNotice(error.message); return }
-    setProfiles((current) => current.map((item) => item.id === profileId ? { ...item, approved, role: approved ? 'admin' : 'viewer' } : item))
-    setNotice(approved ? 'Zugriff freigeschaltet.' : 'Admin-Zugriff entzogen.')
+  async function setProfileAccess(profileId: string, status: 'approved' | 'rejected') {
+    if (!supabase || !isCreator) return
+    const approved = status === 'approved'
+    const { error } = await supabase
+      .from('profiles')
+      .update({ approved, role: approved ? 'admin' : 'viewer', access_status: status })
+      .eq('id', profileId)
+
+    if (error) {
+      setNotice(`Zugriff konnte nicht geändert werden: ${error.message}`)
+      return
+    }
+
+    setProfiles((current) => current.map((item) => item.id === profileId
+      ? { ...item, approved, role: approved ? 'admin' : 'viewer', access_status: status }
+      : item))
+    setNotice(approved ? 'Account als Admin freigeschaltet.' : 'Zugriffsanfrage abgelehnt.')
   }
 
   async function handleAuth(event: FormEvent) {
@@ -476,8 +505,19 @@ function App() {
       if (authMode === 'register') {
         const redirectTo = `${window.location.origin}${window.location.pathname}`
         const { error } = await supabase.auth.signUp({ email: email.trim(), password, options: { emailRedirectTo: redirectTo } })
-        if (error) throw error
-        setNotice('Account angelegt. Prüfe ggf. deine E-Mail. Danach muss ein Admin deinen Zugriff freischalten.')
+        if (error) {
+          const authError = error as { code?: string; status?: number; message?: string }
+          if (authError.code === 'over_email_send_rate_limit' || authError.status === 429) {
+            setNotice('Registrierung derzeit nicht möglich: Das Supabase-E-Mail-Limit wurde erreicht. Der Account wurde noch nicht angelegt. Bitte später erneut versuchen.')
+            return
+          }
+          if (authError.message?.toLowerCase().includes('email address not authorized')) {
+            setNotice('Registrierung derzeit nicht möglich: Der Supabase-Standard-Maildienst darf diese Adresse nicht anschreiben. Für öffentliche Registrierungen muss Custom SMTP eingerichtet werden.')
+            return
+          }
+          throw error
+        }
+        setNotice('Account angelegt. Prüfe deine E-Mail. Danach kann ausschließlich der Ersteller/Admin deinen Zugriff freischalten.')
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password })
         if (error) throw error
@@ -699,12 +739,32 @@ function App() {
               </div>)}</div>}
             </section>}
 
-            <section className="panel access-panel">
-              <div className="section-heading"><div><span className="step">ADMIN</span><h2>Zugriffsfreigaben</h2></div></div>
-              <p className="muted">Registrierte Accounts erhalten erst nach deiner Freigabe Bearbeitungsrechte und Zugriff auf Teilnehmernamen.</p>
-              <div className="admin-toolbar"><button className="button button--ghost" onClick={() => void refreshProfiles()}>Zugriffsanfragen aktualisieren</button></div>
-              <div className="access-list">{profiles.map((item) => <div className="access-row" key={item.id}><div><strong>{item.email}</strong><span>{item.approved && item.role === 'admin' ? 'Freigeschaltet' : 'Wartet auf Freischaltung'}</span></div><div className="access-row__actions">{item.approved ? <button className="button button--danger" disabled={item.id === user?.id} onClick={() => void approveProfile(item.id, false)}>Zugriff entziehen</button> : <button className="button" onClick={() => void approveProfile(item.id, true)}>Freischalten</button>}</div></div>)}</div>
-            </section>
+            {isCreator && <section className="panel access-panel">
+              <div className="section-heading">
+                <div><span className="step">OWNER</span><h2>Admin-Zugriffsanfragen</h2></div>
+                <span className="counter">{profiles.filter((item) => item.access_status === 'pending').length} offen</span>
+              </div>
+              <p className="muted">Nur du als Ersteller (<strong>turnier.admin@gmx.de</strong>) kannst neue Admins freischalten oder Anfragen ablehnen. Neue erfolgreiche Registrierungen werden automatisch aktualisiert.</p>
+              <div className="admin-toolbar"><button className="button button--ghost" onClick={() => void refreshProfiles()}>Jetzt aktualisieren</button></div>
+              <div className="access-list">
+                {profiles.map((item) => {
+                  const statusText = item.is_creator
+                    ? 'Ersteller · dauerhaft freigeschaltet'
+                    : item.access_status === 'approved'
+                      ? 'Als Admin freigeschaltet'
+                      : item.access_status === 'rejected'
+                        ? 'Anfrage abgelehnt'
+                        : 'Wartet auf Entscheidung'
+                  return <div className="access-row" key={item.id}>
+                    <div><strong>{item.email}</strong><span>{statusText}</span></div>
+                    {!item.is_creator && <div className="access-row__actions">
+                      {item.access_status !== 'approved' && <button className="button" onClick={() => void setProfileAccess(item.id, 'approved')}>Freischalten</button>}
+                      {item.access_status !== 'rejected' && <button className="button button--danger" onClick={() => void setProfileAccess(item.id, 'rejected')}>{item.access_status === 'approved' ? 'Zugriff entziehen' : 'Ablehnen'}</button>}
+                    </div>}
+                  </div>
+                })}
+              </div>
+            </section>}
 
             <section className="panel admin-tools"><div><h2>Admin Tools</h2><p className="muted">Turnierstand exportieren/importieren oder Turnierdaten zurücksetzen.</p></div><div className="admin-tools__actions"><button className="button button--ghost" onClick={downloadJson}>Export</button><button className="button button--ghost" onClick={() => importRef.current?.click()}>Import</button><input ref={importRef} type="file" accept="application/json,.json" hidden onChange={(event) => void importState(event.target.files?.[0])} /><button className="button button--danger" onClick={() => void resetTournament()}>Turnier zurücksetzen</button></div></section>
           </>
@@ -713,7 +773,7 @@ function App() {
 
       <footer className="footer"><div className="container">FEELINGS//TOURNAMENT · secure admin mode · powered by Supabase</div></footer>
 
-      {showLogin && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false) }}><div className="auth-modal"><button className="modal-close" onClick={() => setShowLogin(false)}>×</button><p className="eyebrow">SECURE ACCESS</p><h2>{authMode === 'login' ? 'Admin Login' : 'Account registrieren'}</h2><p className="muted">Neue Accounts sind zunächst gesperrt und müssen von einem freigeschalteten Admin bestätigt werden.</p><form className="auth-form" onSubmit={(event) => void handleAuth(event)}><label>E-Mail<input className="text-input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Passwort<input className="text-input" type="password" minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="button button--twitch" disabled={authBusy || authLoading}>{authBusy ? 'Bitte warten …' : authMode === 'login' ? 'Einloggen' : 'Registrieren'}</button></form><button className="auth-switch" onClick={() => setAuthMode((mode) => mode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Noch keinen Account? Registrieren' : 'Bereits registriert? Zum Login'}</button></div></div>}
+      {showLogin && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false) }}><div className="auth-modal"><button className="modal-close" onClick={() => setShowLogin(false)}>×</button><p className="eyebrow">SECURE ACCESS</p><h2>{authMode === 'login' ? 'Admin Login' : 'Account registrieren'}</h2><p className="muted">Neue Accounts sind zunächst gesperrt. Ausschließlich der Ersteller/Admin kann sie freischalten.</p><form className="auth-form" onSubmit={(event) => void handleAuth(event)}><label>E-Mail<input className="text-input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Passwort<input className="text-input" type="password" minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="button button--twitch" disabled={authBusy || authLoading}>{authBusy ? 'Bitte warten …' : authMode === 'login' ? 'Einloggen' : 'Registrieren'}</button></form><button className="auth-switch" onClick={() => setAuthMode((mode) => mode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Noch keinen Account? Registrieren' : 'Bereits registriert? Zum Login'}</button></div></div>}
     </div>
   )
 }

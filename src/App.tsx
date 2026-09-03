@@ -110,6 +110,7 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
   const [settingsTab, setSettingsTab] = useState<'header' | 'group'>('header')
   const [siteSaving, setSiteSaving] = useState(false)
+  const [removingProfileId, setRemovingProfileId] = useState<string | null>(null)
   const importRef = useRef<HTMLInputElement>(null)
   const saveTimer = useRef<number | null>(null)
 
@@ -497,6 +498,50 @@ function App() {
     setNotice(approved ? 'Account als Admin freigeschaltet.' : 'Zugriffsanfrage abgelehnt.')
   }
 
+  async function removeRejectedProfile(profileId: string, profileEmail: string) {
+    if (!supabase || !isCreator) return
+
+    const target = profiles.find((item) => item.id === profileId)
+    if (!target || target.is_creator || target.access_status !== 'rejected') {
+      setNotice('Nur bereits abgelehnte Anfragen können endgültig entfernt werden.')
+      return
+    }
+
+    if (!window.confirm(`Abgelehnte Anfrage von ${profileEmail} endgültig entfernen? Der Login-Account wird dabei ebenfalls gelöscht und kann sich später neu registrieren.`)) return
+
+    setRemovingProfileId(profileId)
+    try {
+      const { data, error } = await supabase.functions.invoke('remove-rejected-admin-request', {
+        body: { userId: profileId },
+      })
+
+      if (error) {
+        let message = typeof data?.error === 'string' ? data.error : ''
+        const context = (error as { context?: Response }).context
+        if (!message && context) {
+          try {
+            const body = await context.clone().json() as { error?: string }
+            message = body.error ?? ''
+          } catch {
+            // Fallback auf die allgemeine Fehlermeldung unten.
+          }
+        }
+        throw new Error(message || 'Die abgelehnte Anfrage konnte nicht entfernt werden.')
+      }
+
+      if (data?.ok !== true) {
+        throw new Error(typeof data?.error === 'string' ? data.error : 'Die abgelehnte Anfrage konnte nicht entfernt werden.')
+      }
+
+      setProfiles((current) => current.filter((item) => item.id !== profileId))
+      setNotice(`Abgelehnte Anfrage von ${profileEmail} wurde endgültig entfernt.`)
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Die abgelehnte Anfrage konnte nicht entfernt werden.')
+    } finally {
+      setRemovingProfileId(null)
+    }
+  }
+
   async function handleAuth(event: FormEvent) {
     event.preventDefault()
     if (!supabase) return
@@ -762,7 +807,7 @@ function App() {
                 <div><span className="step">OWNER</span><h2>Admin-Zugriffsanfragen</h2></div>
                 <span className="counter">{profiles.filter((item) => item.access_status === 'pending').length} offen</span>
               </div>
-              <p className="muted">Nur du als Ersteller (<strong>turnier.admin@gmx.de</strong>) kannst neue Admins freischalten oder Anfragen ablehnen. Neue erfolgreiche Registrierungen werden automatisch aktualisiert.</p>
+              <p className="muted">Nur du als Ersteller (<strong>turnier.admin@gmx.de</strong>) kannst neue Admins freischalten oder Anfragen ablehnen. Abgelehnte Anfragen kannst du anschließend endgültig entfernen; dabei wird auch der zugehörige Login-Account gelöscht und die Adresse kann sich später neu registrieren. Neue erfolgreiche Registrierungen werden automatisch aktualisiert.</p>
               <div className="admin-toolbar"><button className="button button--ghost" onClick={() => void refreshProfiles()}>Jetzt aktualisieren</button></div>
               <div className="access-list">
                 {profiles.map((item) => {
@@ -778,6 +823,7 @@ function App() {
                     {!item.is_creator && <div className="access-row__actions">
                       {item.access_status !== 'approved' && <button className="button" onClick={() => void setProfileAccess(item.id, 'approved')}>Freischalten</button>}
                       {item.access_status !== 'rejected' && <button className="button button--danger" onClick={() => void setProfileAccess(item.id, 'rejected')}>{item.access_status === 'approved' ? 'Zugriff entziehen' : 'Ablehnen'}</button>}
+                      {item.access_status === 'rejected' && <button className="button button--danger" disabled={removingProfileId === item.id} onClick={() => void removeRejectedProfile(item.id, item.email)}>{removingProfileId === item.id ? 'Wird entfernt …' : 'Endgültig entfernen'}</button>}
                     </div>}
                   </div>
                 })}

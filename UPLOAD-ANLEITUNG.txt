@@ -1,42 +1,46 @@
-FEELINGS-TURNIER · SUPABASE-ONLY REGISTRIERUNG
-==============================================
+FEELINGS-TURNIER · SUPABASE-ONLY REGISTRIERUNG + ABGELEHNTE ANFRAGEN AUFRÄUMEN
+================================================================================
 
 Was bereits LIVE in Supabase erledigt wurde:
 - Edge Function "register-admin-request" ist ACTIVE.
+- Edge Function "remove-rejected-admin-request" ist ACTIVE und verlangt einen gültigen Login/JWT.
 - Neue Accounts werden serverseitig mit email_confirm=true angelegt.
 - Dadurch wird bei der Registrierung KEINE Bestätigungs-Mail versendet.
 - Der bestehende Passwort-Reset per E-Mail bleibt unverändert.
 - Neue Profile werden als viewer / approved=false / access_status=pending angelegt.
-- Nur turnier.admin@gmx.de darf Freigaben verwalten (bestehende RLS-Regel).
-- Rate-Limit ist aktiv: max. 3 Versuche pro E-Mail/60 Min. bzw. 8 pro IP/15 Min.
-- Für das Rate-Limit werden nur SHA-256-Hashes gespeichert.
+- Nur turnier.admin@gmx.de darf Freigaben verwalten (serverseitig abgesichert).
+- Nur bereits abgelehnte Accounts können über die neue Löschfunktion endgültig entfernt werden.
+- Der Ersteller-Account, offene Anfragen und freigeschaltete Admins können über diese Funktion NICHT gelöscht werden.
+- Beim endgültigen Entfernen wird der Auth-Account gelöscht; das Profil verschwindet durch ON DELETE CASCADE.
+- Die E-Mail-Adresse kann sich danach bei Bedarf erneut registrieren.
+- Das Registrierungs-Rate-Limit bleibt aktiv: max. 3 Versuche pro E-Mail/60 Min. bzw. 8 pro IP/15 Min.
 
 Was du in GitHub hochladen musst:
 1. src/App.tsx ersetzen
-2. supabase/setup.sql ersetzen (nur Referenz/Versionsstand; NICHT erneut manuell ausführen)
-3. Ordner supabase/functions/register-admin-request/ hinzufügen
+2. Die übrigen enthaltenen src-Dateien kannst du mit hochladen, falls dein Repository noch nicht den letzten Patch enthält.
+3. supabase/setup.sql ersetzen (nur Referenz/Versionsstand; NICHT erneut manuell ausführen)
+4. Ordner supabase/functions/register-admin-request/ hinzufügen/aktualisieren
    - index.ts
-4. Commit nach main
+5. Ordner supabase/functions/remove-rejected-admin-request/ hinzufügen
+   - index.ts
+6. Commit nach main
+
+Neue Bedienung für den Ersteller/Admin:
+1. Anfrage mit "Ablehnen" ablehnen.
+2. Danach erscheint bei dieser Anfrage der Button "Endgültig entfernen".
+3. Nach einer Sicherheitsabfrage wird der zugehörige Supabase-Login-Account gelöscht.
+4. Die Anfrage verschwindet sofort aus der Liste.
 
 Wichtig:
-- Für die eigentliche Funktion musst du in Supabase NICHTS mehr anklicken.
+- Für beide Edge Functions musst du in Supabase NICHTS mehr anklicken.
 - E-Mail-Bestätigung in Supabase muss NICHT deaktiviert werden.
 - "Passwort vergessen" / Recovery bleibt beim bisherigen Mail-System.
-- Nach dem GitHub-Pages-Deploy registriert die Webseite über die Edge Function.
-- Ein neuer Account wird direkt eingeloggt, bleibt aber ohne Freischaltung gesperrt.
-- turnier.admin@gmx.de sieht die Anfrage anschließend in der Zugriffsverwaltung.
+- Nur turnier.admin@gmx.de kann die Funktion zum endgültigen Entfernen erfolgreich nutzen.
 
-Test nach Deployment:
-1. Ausloggen.
-2. Admin Login -> "Noch keinen Account? Registrieren".
-3. Eine neue Test-Mailadresse + Passwort (mind. 8 Zeichen) verwenden.
-4. Es darf KEINE Bestätigungs-Mail verlangt werden.
-5. Die Seite soll "Freischaltung ausstehend" anzeigen.
-6. Als turnier.admin@gmx.de einloggen.
-7. Die neue Anfrage muss unter Zugriffsfreigaben erscheinen.
-8. Freischalten oder ablehnen testen.
-
-Hinweis:
-Ein vollständiger Browser-End-to-End-Test der öffentlich erreichbaren Function konnte
-in der lokalen Tool-Umgebung wegen fehlender DNS-Auflösung nicht ausgeführt werden.
-Die Edge Function wurde von Supabase erfolgreich gebaut/deployed und ist ACTIVE.
+Empfohlener Test nach GitHub-Pages-Deployment:
+1. Mit einem Testaccount registrieren.
+2. Als turnier.admin@gmx.de einloggen.
+3. Testaccount ablehnen.
+4. "Endgültig entfernen" drücken und Sicherheitsabfrage bestätigen.
+5. Prüfen, dass die Zeile aus der Liste verschwindet.
+6. Optional dieselbe Test-Mailadresse erneut registrieren; sie sollte wieder als neue pending-Anfrage erscheinen.

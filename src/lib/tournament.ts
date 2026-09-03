@@ -70,43 +70,49 @@ export function buildStandings(
 }
 
 function isPowerOfTwo(value: number): boolean {
-  return value >= 2 && (value & (value - 1)) === 0
+  return value >= 2 && value <= 32 && (value & (value - 1)) === 0
 }
 
 /**
- * Creates a fair tournament plan that can feed directly into one global KO bracket.
+ * Calculates the global football-style KO plan.
  *
- * Rules:
- * - at least Top 2 per group qualify,
- * - never more than 50% of the smallest group qualify,
- * - total KO field is a power of two (2..32),
- * - if the requested group count cannot produce such a field, the group count is
- *   reduced automatically. This is why 50 players + 10 requested groups becomes
- *   8 groups x Top 2 = 16 qualifiers.
+ * Rules implemented from the tournament specification:
+ * - the requested group count may be reduced automatically until a clean KO field exists,
+ * - at least Top 2 of every group advance,
+ * - never more than 50% of the smallest group advance,
+ * - every group sends the same number of players,
+ * - KO field must be 4/8/16/32 players (maximum start: round of 32),
+ * - at least two groups are required so the first KO round can be cross-group.
+ *
+ * Preference order: keep the group count as close as possible to the user's request.
+ * For that group count, admit the largest valid Top-X field, up to 32 players.
  */
 export function createQualificationPlan(participantCount: number, requestedGroupCount: number): QualificationPlan | null {
   const participants = Math.max(0, Math.trunc(participantCount))
   const requested = Math.max(1, Math.min(10, Math.trunc(requestedGroupCount)))
 
-  if (participants < 4) return null
+  // 2 groups x Top 2 with the 50% rule requires at least 8 total players.
+  if (participants < 8 || requested < 2) return null
 
-  const maximumGroups = Math.min(requested, participants)
+  const maximumGroups = Math.min(requested, 10, Math.floor(participants / 4))
 
-  for (let groupCount = maximumGroups; groupCount >= 1; groupCount -= 1) {
+  for (let groupCount = maximumGroups; groupCount >= 2; groupCount -= 1) {
     const smallestGroupSize = Math.floor(participants / groupCount)
-    const maxPerGroupByHalfRule = Math.floor(smallestGroupSize / 2)
-    const maxPerGroupByBracket = Math.floor(32 / groupCount)
-    const maxQualifiersPerGroup = Math.min(maxPerGroupByHalfRule, maxPerGroupByBracket)
+    const halfLimit = Math.floor(smallestGroupSize / 2)
+    const bracketLimit = Math.floor(32 / groupCount)
+    const maxQualifiersPerGroup = Math.min(halfLimit, bracketLimit)
 
     for (let qualifiersPerGroup = maxQualifiersPerGroup; qualifiersPerGroup >= 2; qualifiersPerGroup -= 1) {
       const knockoutSize = groupCount * qualifiersPerGroup
-      if (!isPowerOfTwo(knockoutSize) || knockoutSize > 32) continue
+      if (!isPowerOfTwo(knockoutSize) || knockoutSize < 4) continue
 
       return {
+        requestedGroupCount: requested,
         groupCount,
         qualifiersPerGroup,
         knockoutSize,
-        adjustedFromGroupCount: groupCount === requested ? null : requested,
+        adjusted: groupCount !== requested,
+        smallestGroupSize,
       }
     }
   }
@@ -123,69 +129,48 @@ export function createQualificationPlanForExistingGroups(
   return plan
 }
 
-function groupIndex(groupId: string, groups: TournamentGroup[]): number {
-  const index = groups.findIndex((group) => group.id === groupId)
-  return index < 0 ? Number.MAX_SAFE_INTEGER : index
+function orderedGroupIndex(groups: TournamentGroup[]): Map<string, number> {
+  return new Map(groups.map((group, index) => [group.id, index]))
 }
 
+/**
+ * First KO round: high group seeds face low group seeds from a DIFFERENT group.
+ * Top 2 example: A1-B2, B1-C2, ..., H1-A2.
+ * Top 4 example: rank 1 vs rank 4 cross-group and rank 2 vs rank 3 cross-group.
+ */
 function pairFootballStyle(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]): KnockoutMatch[] {
-  if (qualifiers.length < 2) return []
+  if (groups.length < 2 || qualifiers.length < 4) return []
 
+  const groupOrder = orderedGroupIndex(groups)
   const qualifiersPerGroup = Math.max(...qualifiers.map((qualifier) => qualifier.groupRank))
-  const highRankLimit = Math.ceil(qualifiersPerGroup / 2)
-  const highSeeds = qualifiers
-    .filter((qualifier) => qualifier.groupRank <= highRankLimit)
-    .sort((a, b) => a.groupRank - b.groupRank || groupIndex(a.groupId, groups) - groupIndex(b.groupId, groups))
-  const lowSeeds = qualifiers
-    .filter((qualifier) => qualifier.groupRank > highRankLimit)
-    .sort((a, b) => b.groupRank - a.groupRank || groupIndex(a.groupId, groups) - groupIndex(b.groupId, groups))
-
-  // With the allowed plan sizes qualifiersPerGroup is always even. Keep a safe
-  // fallback so imported legacy data cannot break the bracket.
-  if (highSeeds.length !== lowSeeds.length) {
-    const ordered = [...qualifiers].sort(
-      (a, b) => a.groupRank - b.groupRank || groupIndex(a.groupId, groups) - groupIndex(b.groupId, groups),
-    )
-    return Array.from({ length: ordered.length / 2 }, (_, matchIndex) => ({
-      id: `ko-r0-m${matchIndex}`,
-      player1Id: ordered[matchIndex]?.participantId ?? null,
-      player2Id: ordered[ordered.length - 1 - matchIndex]?.participantId ?? null,
-      winnerId: null,
-    }))
-  }
-
-  const unusedLow = [...lowSeeds]
   const matches: KnockoutMatch[] = []
+  const half = qualifiersPerGroup / 2
 
-  highSeeds.forEach((highSeed, matchIndex) => {
-    const expectedOpponentRank = qualifiersPerGroup + 1 - highSeed.groupRank
-    const sourceGroupIndex = groupIndex(highSeed.groupId, groups)
+  for (let rankIndex = 0; rankIndex < half; rankIndex += 1) {
+    const highRank = rankIndex + 1
+    const lowRank = qualifiersPerGroup - rankIndex
+    const highPot = qualifiers
+      .filter((qualifier) => qualifier.groupRank === highRank)
+      .sort((a, b) => (groupOrder.get(a.groupId) ?? 0) - (groupOrder.get(b.groupId) ?? 0))
+    const lowPot = qualifiers
+      .filter((qualifier) => qualifier.groupRank === lowRank)
+      .sort((a, b) => (groupOrder.get(a.groupId) ?? 0) - (groupOrder.get(b.groupId) ?? 0))
 
-    let bestIndex = -1
-    let bestScore = Number.MAX_SAFE_INTEGER
+    if (highPot.length !== groups.length || lowPot.length !== groups.length) return []
 
-    unusedLow.forEach((lowSeed, candidateIndex) => {
-      const sameGroupPenalty = lowSeed.groupId === highSeed.groupId && groups.length > 1 ? 100_000 : 0
-      const rankPenalty = Math.abs(lowSeed.groupRank - expectedOpponentRank) * 1_000
-      const targetGroupIndex = groups.length > 1 ? (sourceGroupIndex + 1) % groups.length : sourceGroupIndex
-      const candidateGroupIndex = groupIndex(lowSeed.groupId, groups)
-      const groupDistance = Math.abs(candidateGroupIndex - targetGroupIndex)
-      const score = sameGroupPenalty + rankPenalty + groupDistance
+    // Rotate the lower seed pot. Any non-zero rotation guarantees a different source group.
+    const rotation = groups.length === 2 ? 1 : (rankIndex % (groups.length - 1)) + 1
 
-      if (score < bestScore) {
-        bestScore = score
-        bestIndex = candidateIndex
-      }
+    highPot.forEach((highSeed, index) => {
+      const lowSeed = lowPot[(index + rotation) % lowPot.length]
+      matches.push({
+        id: `ko-r0-m${matches.length}`,
+        player1Id: highSeed.participantId,
+        player2Id: lowSeed.participantId,
+        winnerId: null,
+      })
     })
-
-    const opponent = bestIndex >= 0 ? unusedLow.splice(bestIndex, 1)[0] : null
-    matches.push({
-      id: `ko-r0-m${matchIndex}`,
-      player1Id: highSeed.participantId,
-      player2Id: opponent?.participantId ?? null,
-      winnerId: null,
-    })
-  })
+  }
 
   return matches
 }
@@ -207,26 +192,33 @@ export function createGlobalKnockoutBracket(
       })),
   )
 
-  const rounds: KnockoutMatch[][] = []
   const firstRound = pairFootballStyle(qualifiers, groups)
+  const rounds: KnockoutMatch[][] = []
 
-  if (firstRound.length > 0) {
-    rounds.push(firstRound)
-    let matchesInNextRound = firstRound.length / 2
-    let roundIndex = 1
-
-    while (matchesInNextRound >= 1) {
-      rounds.push(
-        Array.from({ length: matchesInNextRound }, (_, matchIndex) => ({
-          id: `ko-r${roundIndex}-m${matchIndex}`,
-          player1Id: null,
-          player2Id: null,
-          winnerId: null,
-        })),
-      )
-      matchesInNextRound /= 2
-      roundIndex += 1
+  if (firstRound.length * 2 !== qualifiers.length) {
+    return {
+      qualifierIds: qualifiers.map((qualifier) => qualifier.participantId),
+      qualifiers,
+      createdAt: new Date().toISOString(),
+      rounds: [],
     }
+  }
+
+  rounds.push(firstRound)
+
+  let matchesInNextRound = firstRound.length / 2
+  let roundIndex = 1
+  while (matchesInNextRound >= 1) {
+    rounds.push(
+      Array.from({ length: matchesInNextRound }, (_, matchIndex) => ({
+        id: `ko-r${roundIndex}-m${matchIndex}`,
+        player1Id: null,
+        player2Id: null,
+        winnerId: null,
+      })),
+    )
+    matchesInNextRound /= 2
+    roundIndex += 1
   }
 
   return {
@@ -250,6 +242,8 @@ export function updateBracketWinner(
   const allowed = [target.player1Id, target.player2Id].filter(Boolean)
   target.winnerId = winnerId && allowed.includes(winnerId) ? winnerId : null
 
+  // Every following round is derived from the previous winners. Changing an earlier
+  // result automatically invalidates downstream results that no longer fit.
   for (let r = roundIndex + 1; r < rounds.length; r += 1) {
     const previousRound = rounds[r - 1]
     rounds[r].forEach((match, index) => {

@@ -1,0 +1,25 @@
+FEELINGS-TURNIER – KORREKTUR-PATCH
+
+Diese Dateien ersetzen die gleichnamigen Dateien im Repository:
+
+.github/workflows/static.yml
+src/App.tsx
+src/styles.css
+src/types.ts
+src/lib/tournament.ts
+public/favicon.svg
+index.html
+README.md
+
+UPLOAD:
+1. ZIP entpacken.
+2. Jede Datei im GitHub-Repository am exakt gleichen Pfad ersetzen.
+3. Keine Dateien als App-neu.tsx o. ä. anlegen.
+4. Commit auf main.
+5. GitHub Actions -> feelingsturnier prüfen.
+6. Settings -> Pages -> Source muss GitHub Actions sein.
+
+WICHTIG:
+- Es gibt nur noch EINE globale KO-Phase nach allen Gruppen.
+- Keine KO-Bäume mehr innerhalb einzelner Gruppen.
+- Die erste KO-Runde ist gruppenübergreifend gesetzt.

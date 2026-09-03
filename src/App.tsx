@@ -12,8 +12,8 @@ import {
 import { calculateRoundScore, emptyParticipantStats, formatPoints } from './lib/scoring'
 import type { ParticipantStats, QualificationPlan, RoundStats, TournamentState } from './types'
 
-const STORAGE_KEY = 'das-feelings-turnier:v2'
-const LEGACY_STORAGE_KEY = 'das-feelings-turnier:v1'
+const STORAGE_KEY = 'das-feelings-turnier:v3'
+const LEGACY_STORAGE_KEYS = ['das-feelings-turnier:v2', 'das-feelings-turnier:v1']
 
 const DEFAULT_STATE: TournamentState = {
   participants: [],
@@ -25,7 +25,7 @@ const DEFAULT_STATE: TournamentState = {
 
 function loadState(): TournamentState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY)
+    const raw = localStorage.getItem(STORAGE_KEY) ?? LEGACY_STORAGE_KEYS.map((key) => localStorage.getItem(key)).find(Boolean)
     if (!raw) return DEFAULT_STATE
     const parsed = JSON.parse(raw) as Partial<TournamentState>
     return {
@@ -51,7 +51,7 @@ function downloadJson(data: TournamentState) {
 }
 
 function planText(plan: QualificationPlan | null): string {
-  if (!plan) return 'Für eine regelkonforme K.-o.-Phase werden mindestens 4 Teilnehmer benötigt.'
+  if (!plan) return 'Für eine gruppenübergreifende K.-o.-Phase werden mindestens 8 Teilnehmer und mindestens 2 Gruppen benötigt.'
   return `${plan.groupCount} Gruppen · Top ${plan.qualifiersPerGroup} je Gruppe · ${plan.knockoutSize} Spieler in der K.-o.-Phase · Start im ${roundName(plan.knockoutSize, 0)}`
 }
 
@@ -165,10 +165,10 @@ function App() {
     }))
 
     if (!plan) {
-      setNotice('Gruppen erstellt. Für die K.-o.-Regeln werden mindestens 4 Teilnehmer benötigt.')
-    } else if (plan.adjustedFromGroupCount) {
+      setNotice('Gruppen erstellt. Für die gruppenübergreifende K.-o.-Phase werden mindestens 8 Teilnehmer und 2 Gruppen benötigt.')
+    } else if (plan.adjusted) {
       setNotice(
-        `Für einen fairen K.-o.-Baum wurde automatisch von ${plan.adjustedFromGroupCount} auf ${plan.groupCount} Gruppen angepasst.`,
+        `Automatisch angepasst: ${plan.requestedGroupCount} gewünschte Gruppen → ${plan.groupCount} Gruppen, damit Top ${plan.qualifiersPerGroup} ein sauberes ${plan.knockoutSize}er-K.O.-Feld ergeben.`,
       )
     } else {
       setNotice(`Gruppen erstellt · Top ${plan.qualifiersPerGroup} je Gruppe ziehen später in die K.-o.-Phase ein.`)
@@ -207,8 +207,8 @@ function App() {
       activePlan.qualifiersPerGroup,
     )
 
-    if (bracket.qualifierIds.length !== activePlan.knockoutSize) {
-      setNotice('K.-o.-Baum konnte nicht vollständig erstellt werden. Bitte Gruppen neu auslosen.')
+    if (bracket.qualifierIds.length !== activePlan.knockoutSize || bracket.rounds.length === 0) {
+      setNotice('K.-o.-Baum konnte nicht gruppenübergreifend gesetzt werden. Bitte Gruppen neu auslosen.')
       return
     }
 
@@ -232,7 +232,7 @@ function App() {
     setNewName('')
     setBulkNames('')
     localStorage.removeItem(STORAGE_KEY)
-    localStorage.removeItem(LEGACY_STORAGE_KEY)
+    LEGACY_STORAGE_KEYS.forEach((key) => localStorage.removeItem(key))
     setNotice('Turnier wurde zurückgesetzt.')
   }
 
@@ -268,41 +268,55 @@ function App() {
   return (
     <div className="app-shell">
       <header className="hero">
-        <div className="hero__orb hero__orb--one" />
-        <div className="hero__orb hero__orb--two" />
+        <div className="hero__noise" />
         <div className="hero__sparkle hero__sparkle--one">✦</div>
         <div className="hero__sparkle hero__sparkle--two">♡</div>
         <div className="hero__content container">
           <div className="hero__copy">
             <div className="brand-lockup">
               <span className="brand-lockup__mark">˚ʚ♡ɞ˚</span>
-              <span className="brand-lockup__text">Feelings Community Cup</span>
+              <span className="brand-lockup__text">brumefeelings community tournament</span>
             </div>
-            <p className="eyebrow">KDA · Gruppenphase · Football-style K.O.</p>
-            <h1>Das <span>Feelings</span>-Turnier</h1>
+            <p className="eyebrow">VALORANT · 3 Games · Global Knockout</p>
+            <h1><span>Feelings</span><br />Turnier</h1>
             <p className="hero__lead">
-              Drei Games. Eine Rangliste. Danach geht’s in einen gemeinsamen K.-o.-Baum – mit Gruppensiegern gegen
-              niedriger gesetzte Spieler aus anderen Gruppen. Cozy Look, sweaty Matches. ♡
+              Erst die Gruppenphase, dann ein gemeinsamer Fußball-K.O.-Baum. Die besten Seeds jeder Gruppe werden
+              automatisch gegen niedriger platzierte Spieler aus <strong>anderen Gruppen</strong> gesetzt.
             </p>
             <div className="hero__meta">
-              <span>🐸 Community vibes</span>
-              <span>✦ bis 32 Spieler im K.O.</span>
-              <span>♡ automatische Setzliste</span>
+              <span>♡ Top X automatisch</span>
+              <span>✦ max. Sechzehntelfinale</span>
+              <span>☁ Cross-Group Seeding</span>
+            </div>
+            <div className="hero__actions">
+              <a className="button button--twitch" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">
+                Twitch öffnen ↗
+              </a>
+              <button className="button button--ghost" onClick={() => downloadJson(state)}>Turnier exportieren</button>
+              <button className="button button--ghost" onClick={() => importRef.current?.click()}>Import</button>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json,.json"
+                hidden
+                onChange={(event: ChangeEvent<HTMLInputElement>) => void importState(event.target.files?.[0])}
+              />
             </div>
           </div>
-          <div className="hero__actions">
-            <a className="button button--twitch" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">
-              Brume auf Twitch ↗
-            </a>
-            <button className="button button--ghost" onClick={() => downloadJson(state)}>Export</button>
-            <button className="button button--ghost" onClick={() => importRef.current?.click()}>Import</button>
-            <input
-              ref={importRef}
-              type="file"
-              accept="application/json,.json"
-              hidden
-              onChange={(event: ChangeEvent<HTMLInputElement>) => void importState(event.target.files?.[0])}
-            />
+
+          <div className="hero__visual" aria-hidden="true">
+            <div className="brume-card">
+              <div className="brume-card__shine" />
+              <div className="brume-card__logo">
+                <span>Brume</span>
+                <small>feelings</small>
+              </div>
+              <div className="brume-card__handle">brumefeelings</div>
+              <div className="brume-card__divider" />
+              <div className="brume-card__caption">community cup · made with ♡</div>
+            </div>
+            <span className="floating-heart floating-heart--one">♡</span>
+            <span className="floating-heart floating-heart--two">✦</span>
           </div>
         </div>
       </header>
@@ -430,17 +444,16 @@ function App() {
                 <PlanMetric label="Start" value={roundName(previewPlan.knockoutSize, 0)} />
               </div>
             )}
-            {previewPlan?.adjustedFromGroupCount && (
+            {previewPlan?.adjusted && (
               <p className="plan-card__adjustment">
-                ✦ {previewPlan.adjustedFromGroupCount} Gruppen ergeben kein gleichmäßiges Zweierpotenz-K.O.-Feld. Die App
-                passt deshalb beim Auslosen automatisch auf {previewPlan.groupCount} Gruppen an.
+                ✦ {previewPlan.requestedGroupCount} Gruppen würden kein regelkonformes K.O.-Feld ergeben. Beim Auslosen werden deshalb automatisch {previewPlan.groupCount} Gruppen erstellt.
               </p>
             )}
           </div>
 
           <p className="muted">
             Pro Gruppe ziehen mindestens die Top 2 weiter, aber niemals mehr als 50&nbsp;% der Gruppe. Das Gesamtfeld wird
-            automatisch auf 2, 4, 8, 16 oder maximal 32 Spieler gebracht.
+            automatisch auf 4, 8, 16 oder maximal 32 Spieler gebracht.
           </p>
         </section>
 
@@ -609,7 +622,7 @@ function App() {
                       </p>
                     </div>
                     <button className="button button--ko" onClick={generateGlobalBracket}>
-                      {state.knockoutBracket ? 'K.O. neu setzen' : 'K.O.-Phase erstellen'}
+                      {state.knockoutBracket ? 'K.O. aus Ranglisten neu setzen' : 'Gruppenphase abschließen → K.O. starten'}
                     </button>
                   </div>
 
@@ -689,7 +702,7 @@ function App() {
                 </>
               ) : (
                 <div className="empty-state">
-                  Diese Teilnehmer-/Gruppenzahl erfüllt die Regeln noch nicht. Mindestens 4 Teilnehmer sind erforderlich.
+                  Diese Teilnehmer-/Gruppenzahl erfüllt die Regeln noch nicht. Für Cross-Group-K.O. brauchst du mindestens 8 Teilnehmer und 2 Gruppen.
                 </div>
               )}
             </section>

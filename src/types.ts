@@ -29,10 +29,12 @@ export type StandingRow = {
 }
 
 export type QualificationPlan = {
+  requestedGroupCount: number
   groupCount: number
   qualifiersPerGroup: number
   knockoutSize: number
-  adjustedFromGroupCount: number | null
+  adjusted: boolean
+  smallestGroupSize: number
 }
 
 export type QualifiedPlayer = {

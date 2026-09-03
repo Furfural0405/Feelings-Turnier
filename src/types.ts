@@ -28,6 +28,20 @@ export type StandingRow = {
   deaths: number
 }
 
+export type QualificationPlan = {
+  groupCount: number
+  qualifiersPerGroup: number
+  knockoutSize: number
+  adjustedFromGroupCount: number | null
+}
+
+export type QualifiedPlayer = {
+  participantId: string
+  groupId: string
+  groupName: string
+  groupRank: number
+}
+
 export type KnockoutMatch = {
   id: string
   player1Id: string | null
@@ -36,8 +50,8 @@ export type KnockoutMatch = {
 }
 
 export type KnockoutBracket = {
-  groupId: string
   qualifierIds: string[]
+  qualifiers: QualifiedPlayer[]
   createdAt: string
   rounds: KnockoutMatch[][]
 }
@@ -47,5 +61,5 @@ export type TournamentState = {
   groupCount: number
   groups: TournamentGroup[]
   stats: Record<string, ParticipantStats>
-  brackets: Record<string, KnockoutBracket>
+  knockoutBracket: KnockoutBracket | null
 }

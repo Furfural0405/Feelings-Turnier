@@ -1,28 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import type { ChangeEvent, KeyboardEvent } from 'react'
 import {
   buildStandings,
-  createKnockoutBracket,
+  createGlobalKnockoutBracket,
+  createQualificationPlan,
+  createQualificationPlanForExistingGroups,
   distributeIntoGroups,
-  qualifierCount,
   roundName,
   updateBracketWinner,
 } from './lib/tournament'
 import { calculateRoundScore, emptyParticipantStats, formatPoints } from './lib/scoring'
-import type { ParticipantStats, RoundStats, TournamentState } from './types'
+import type { ParticipantStats, QualificationPlan, RoundStats, TournamentState } from './types'
 
-const STORAGE_KEY = 'das-feelings-turnier:v1'
+const STORAGE_KEY = 'das-feelings-turnier:v2'
+const LEGACY_STORAGE_KEY = 'das-feelings-turnier:v1'
 
 const DEFAULT_STATE: TournamentState = {
   participants: [],
   groupCount: 2,
   groups: [],
   stats: {},
-  brackets: {},
+  knockoutBracket: null,
 }
 
 function loadState(): TournamentState {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(STORAGE_KEY) ?? localStorage.getItem(LEGACY_STORAGE_KEY)
     if (!raw) return DEFAULT_STATE
     const parsed = JSON.parse(raw) as Partial<TournamentState>
     return {
@@ -30,7 +33,7 @@ function loadState(): TournamentState {
       groupCount: Number(parsed.groupCount) >= 1 && Number(parsed.groupCount) <= 10 ? Number(parsed.groupCount) : 2,
       groups: Array.isArray(parsed.groups) ? parsed.groups : [],
       stats: parsed.stats && typeof parsed.stats === 'object' ? parsed.stats : {},
-      brackets: parsed.brackets && typeof parsed.brackets === 'object' ? parsed.brackets : {},
+      knockoutBracket: parsed.knockoutBracket ?? null,
     }
   } catch {
     return DEFAULT_STATE
@@ -47,6 +50,11 @@ function downloadJson(data: TournamentState) {
   URL.revokeObjectURL(url)
 }
 
+function planText(plan: QualificationPlan | null): string {
+  if (!plan) return 'Für eine regelkonforme K.-o.-Phase werden mindestens 4 Teilnehmer benötigt.'
+  return `${plan.groupCount} Gruppen · Top ${plan.qualifiersPerGroup} je Gruppe · ${plan.knockoutSize} Spieler in der K.-o.-Phase · Start im ${roundName(plan.knockoutSize, 0)}`
+}
+
 function App() {
   const [state, setState] = useState<TournamentState>(loadState)
   const [newName, setNewName] = useState('')
@@ -60,7 +68,7 @@ function App() {
 
   useEffect(() => {
     if (!notice) return
-    const timeout = window.setTimeout(() => setNotice(''), 2800)
+    const timeout = window.setTimeout(() => setNotice(''), 3600)
     return () => window.clearTimeout(timeout)
   }, [notice])
 
@@ -68,6 +76,21 @@ function App() {
     () => new Map(state.participants.map((participant) => [participant.id, participant])),
     [state.participants],
   )
+
+  const previewPlan = useMemo(
+    () => createQualificationPlan(state.participants.length, state.groupCount),
+    [state.participants.length, state.groupCount],
+  )
+
+  const activePlan = useMemo(
+    () =>
+      state.groups.length > 0
+        ? createQualificationPlanForExistingGroups(state.participants.length, state.groups.length)
+        : previewPlan,
+    [previewPlan, state.groups.length, state.participants.length],
+  )
+
+  const championId = state.knockoutBracket?.rounds.at(-1)?.[0]?.winnerId ?? null
 
   function addNames(names: string[]) {
     const cleaned = names.map((name) => name.trim()).filter(Boolean)
@@ -85,7 +108,11 @@ function App() {
         .map((name) => ({ id: crypto.randomUUID(), name }))
 
       if (newParticipants.length === 0) return current
-      return { ...current, participants: [...current.participants, ...newParticipants] }
+      return {
+        ...current,
+        participants: [...current.participants, ...newParticipants],
+        knockoutBracket: null,
+      }
     })
   }
 
@@ -113,21 +140,39 @@ function App() {
           participantIds: group.participantIds.filter((id) => id !== participantId),
         })),
         stats,
-        brackets: {},
+        knockoutBracket: null,
       }
     })
   }
 
   function createGroups() {
     if (state.participants.length === 0) {
-      setNotice('Bitte zuerst Teilnehmer hinzufügen.')
+      setNotice('Bitte zuerst Teilnehmer hinzufügen. ♡')
       return
     }
 
-    const groups = distributeIntoGroups(state.participants, state.groupCount)
+    const plan = createQualificationPlan(state.participants.length, state.groupCount)
+    const actualGroupCount = plan?.groupCount ?? Math.max(1, Math.min(state.groupCount, state.participants.length))
+    const groups = distributeIntoGroups(state.participants, actualGroupCount)
     const stats = Object.fromEntries(state.participants.map((participant) => [participant.id, emptyParticipantStats()]))
-    setState((current) => ({ ...current, groups, stats, brackets: {} }))
-    setNotice('Gruppen erstellt – KDA-Statistiken wurden zurückgesetzt.')
+
+    setState((current) => ({
+      ...current,
+      groupCount: actualGroupCount,
+      groups,
+      stats,
+      knockoutBracket: null,
+    }))
+
+    if (!plan) {
+      setNotice('Gruppen erstellt. Für die K.-o.-Regeln werden mindestens 4 Teilnehmer benötigt.')
+    } else if (plan.adjustedFromGroupCount) {
+      setNotice(
+        `Für einen fairen K.-o.-Baum wurde automatisch von ${plan.adjustedFromGroupCount} auf ${plan.groupCount} Gruppen angepasst.`,
+      )
+    } else {
+      setNotice(`Gruppen erstellt · Top ${plan.qualifiersPerGroup} je Gruppe ziehen später in die K.-o.-Phase ein.`)
+    }
   }
 
   function updateStat(participantId: string, roundIndex: number, field: keyof RoundStats, rawValue: string) {
@@ -144,51 +189,57 @@ function App() {
           ...current.stats,
           [participantId]: { rounds },
         },
+        knockoutBracket: null,
       }
     })
   }
 
-  function generateBracket(groupId: string) {
-    const group = state.groups.find((item) => item.id === groupId)
-    if (!group) return
-    const standings = buildStandings(group, state.participants, state.stats)
-    const count = qualifierCount(group.participantIds.length)
-    const qualifierIds = standings.slice(0, count).map((row) => row.participantId)
-    const bracket = createKnockoutBracket(groupId, qualifierIds)
-    setState((current) => ({
-      ...current,
-      brackets: { ...current.brackets, [groupId]: bracket },
-    }))
-    setNotice(`${group.name}: K.-o.-Baum aus der aktuellen Rangliste erstellt.`)
+  function generateGlobalBracket() {
+    if (state.groups.length === 0 || !activePlan) {
+      setNotice('Die aktuelle Gruppeneinteilung kann noch keinen regelkonformen K.-o.-Baum bilden.')
+      return
+    }
+
+    const bracket = createGlobalKnockoutBracket(
+      state.groups,
+      state.participants,
+      state.stats,
+      activePlan.qualifiersPerGroup,
+    )
+
+    if (bracket.qualifierIds.length !== activePlan.knockoutSize) {
+      setNotice('K.-o.-Baum konnte nicht vollständig erstellt werden. Bitte Gruppen neu auslosen.')
+      return
+    }
+
+    setState((current) => ({ ...current, knockoutBracket: bracket }))
+    setNotice(`${activePlan.knockoutSize} Spieler gesetzt · ${roundName(activePlan.knockoutSize, 0)} kann starten! ✦`)
   }
 
-  function selectWinner(groupId: string, roundIndex: number, matchIndex: number, winnerId: string) {
+  function selectWinner(roundIndex: number, matchIndex: number, winnerId: string) {
     setState((current) => {
-      const bracket = current.brackets[groupId]
-      if (!bracket) return current
+      if (!current.knockoutBracket) return current
       return {
         ...current,
-        brackets: {
-          ...current.brackets,
-          [groupId]: updateBracketWinner(bracket, roundIndex, matchIndex, winnerId || null),
-        },
+        knockoutBracket: updateBracketWinner(current.knockoutBracket, roundIndex, matchIndex, winnerId || null),
       }
     })
   }
 
   function resetTournament() {
-    if (!window.confirm('Wirklich alle Teilnehmer, Statistiken, Gruppen und K.-o.-Bäume löschen?')) return
+    if (!window.confirm('Wirklich alle Teilnehmer, Statistiken, Gruppen und K.-o.-Ergebnisse löschen?')) return
     setState(DEFAULT_STATE)
     setNewName('')
     setBulkNames('')
     localStorage.removeItem(STORAGE_KEY)
+    localStorage.removeItem(LEGACY_STORAGE_KEY)
     setNotice('Turnier wurde zurückgesetzt.')
   }
 
   async function importState(file: File | undefined) {
     if (!file) return
     try {
-      const parsed = JSON.parse(await file.text()) as TournamentState
+      const parsed = JSON.parse(await file.text()) as Partial<TournamentState>
       if (!Array.isArray(parsed.participants) || !Array.isArray(parsed.groups)) {
         throw new Error('Ungültiges Format')
       }
@@ -197,9 +248,9 @@ function App() {
         groupCount: Math.max(1, Math.min(10, Number(parsed.groupCount) || 1)),
         groups: parsed.groups,
         stats: parsed.stats ?? {},
-        brackets: parsed.brackets ?? {},
+        knockoutBracket: parsed.knockoutBracket ?? null,
       })
-      setNotice('Turnierstand importiert.')
+      setNotice('Turnierstand importiert. ♡')
     } catch {
       setNotice('Import fehlgeschlagen: Datei ist kein gültiger Turnierstand.')
     } finally {
@@ -207,41 +258,75 @@ function App() {
     }
   }
 
+  function qualifierLabel(participantId: string | null): string | null {
+    if (!participantId || !state.knockoutBracket) return null
+    const qualifier = state.knockoutBracket.qualifiers.find((item) => item.participantId === participantId)
+    if (!qualifier) return null
+    return `${qualifier.groupRank}. · ${qualifier.groupName}`
+  }
+
   return (
     <div className="app-shell">
       <header className="hero">
-        <div className="hero__glow" />
+        <div className="hero__orb hero__orb--one" />
+        <div className="hero__orb hero__orb--two" />
+        <div className="hero__sparkle hero__sparkle--one">✦</div>
+        <div className="hero__sparkle hero__sparkle--two">♡</div>
         <div className="hero__content container">
-          <div>
-            <p className="eyebrow">KDA • Gruppenphase • K.-o.-System</p>
-            <h1>Das Feelings-Turnier</h1>
+          <div className="hero__copy">
+            <div className="brand-lockup">
+              <span className="brand-lockup__mark">˚ʚ♡ɞ˚</span>
+              <span className="brand-lockup__text">Feelings Community Cup</span>
+            </div>
+            <p className="eyebrow">KDA · Gruppenphase · Football-style K.O.</p>
+            <h1>Das <span>Feelings</span>-Turnier</h1>
             <p className="hero__lead">
-              Teilnehmer verwalten, zufällig auf 1–10 Gruppen verteilen, drei KDA-Runden werten und daraus automatisch
-              die K.-o.-Phase setzen.
+              Drei Games. Eine Rangliste. Danach geht’s in einen gemeinsamen K.-o.-Baum – mit Gruppensiegern gegen
+              niedriger gesetzte Spieler aus anderen Gruppen. Cozy Look, sweaty Matches. ♡
             </p>
+            <div className="hero__meta">
+              <span>🐸 Community vibes</span>
+              <span>✦ bis 32 Spieler im K.O.</span>
+              <span>♡ automatische Setzliste</span>
+            </div>
           </div>
           <div className="hero__actions">
-            <button className="button button--ghost" onClick={() => downloadJson(state)}>Turnier exportieren</button>
-            <button className="button button--ghost" onClick={() => importRef.current?.click()}>Turnier importieren</button>
+            <a className="button button--twitch" href="https://www.twitch.tv/brumefeelings" target="_blank" rel="noreferrer">
+              Brume auf Twitch ↗
+            </a>
+            <button className="button button--ghost" onClick={() => downloadJson(state)}>Export</button>
+            <button className="button button--ghost" onClick={() => importRef.current?.click()}>Import</button>
             <input
               ref={importRef}
               type="file"
               accept="application/json,.json"
               hidden
-              onChange={(event) => void importState(event.target.files?.[0])}
+              onChange={(event: ChangeEvent<HTMLInputElement>) => void importState(event.target.files?.[0])}
             />
           </div>
         </div>
       </header>
 
+      <nav className="quick-nav" aria-label="Turnier-Navigation">
+        <div className="container quick-nav__inner">
+          <a href="#teilnehmer">01 Teilnehmer</a>
+          <a href="#gruppen">02 Gruppen</a>
+          <a href="#wertung">03 KDA</a>
+          <a href="#ko-phase">04 K.O.</a>
+        </div>
+      </nav>
+
       <main className="container main-grid">
         {notice && <div className="notice" role="status">{notice}</div>}
 
-        <section className="panel" id="teilnehmer">
+        <section className="panel panel--featured" id="teilnehmer">
           <div className="section-heading">
             <div>
               <span className="step">01</span>
-              <h2>Teilnehmer</h2>
+              <div>
+                <p className="section-kicker">ready, set, feelings ♡</p>
+                <h2>Teilnehmer</h2>
+              </div>
             </div>
             <span className="counter">{state.participants.length} gesamt</span>
           </div>
@@ -251,14 +336,14 @@ function App() {
               <input
                 className="text-input"
                 value={newName}
-                onChange={(event) => setNewName(event.target.value)}
-                onKeyDown={(event) => {
+                onChange={(event: ChangeEvent<HTMLInputElement>) => setNewName(event.target.value)}
+                onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
                   if (event.key === 'Enter') addSingleParticipant()
                 }}
                 placeholder="Name oder Gamer-Tag"
                 aria-label="Teilnehmername"
               />
-              <button className="button" onClick={addSingleParticipant}>Hinzufügen</button>
+              <button className="button" onClick={addSingleParticipant}>Hinzufügen ♡</button>
             </div>
 
             <details className="bulk-add">
@@ -266,7 +351,7 @@ function App() {
               <textarea
                 className="text-area"
                 value={bulkNames}
-                onChange={(event) => setBulkNames(event.target.value)}
+                onChange={(event: ChangeEvent<HTMLTextAreaElement>) => setBulkNames(event.target.value)}
                 placeholder={'Eine Person pro Zeile\nFeelingsOne\nFeelingsTwo\nFeelingsThree'}
               />
               <button className="button button--secondary" onClick={addBulkParticipants}>Liste übernehmen</button>
@@ -274,7 +359,7 @@ function App() {
           </div>
 
           {state.participants.length === 0 ? (
-            <div className="empty-state">Noch keine Teilnehmer eingetragen.</div>
+            <div className="empty-state">Noch keine Teilnehmer eingetragen. Die Lobby wartet ✦</div>
           ) : (
             <div className="chips">
               {state.participants.map((participant, index) => (
@@ -299,30 +384,63 @@ function App() {
           <div className="section-heading">
             <div>
               <span className="step">02</span>
-              <h2>Gruppen auslosen</h2>
+              <div>
+                <p className="section-kicker">group draw ✦</p>
+                <h2>Gruppen auslosen</h2>
+              </div>
             </div>
           </div>
 
           <div className="group-controls">
-            <label className="field-label" htmlFor="group-count">Anzahl der Gruppen</label>
+            <label className="field-label" htmlFor="group-count">Gewünschte Gruppen</label>
             <select
               id="group-count"
               className="select-input"
               value={state.groupCount}
-              onChange={(event) => setState((current) => ({ ...current, groupCount: Number(event.target.value) }))}
+              onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                setState((current) => ({
+                  ...current,
+                  groupCount: Number(event.target.value),
+                  knockoutBracket: null,
+                }))
+              }
             >
               {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
                 <option key={count} value={count}>{count}</option>
               ))}
             </select>
             <button className="button" onClick={createGroups}>
-              {state.groups.length > 0 ? 'Neu auslosen & Statistik zurücksetzen' : 'Gruppen erstellen'}
+              {state.groups.length > 0 ? 'Neu auslosen' : 'Gruppen erstellen'}
             </button>
           </div>
 
+          <div className="plan-card">
+            <div className="plan-card__header">
+              <span className="plan-card__icon">♡</span>
+              <div>
+                <strong>Automatischer Turnierplan</strong>
+                <p>{planText(previewPlan)}</p>
+              </div>
+            </div>
+            {previewPlan && (
+              <div className="plan-metrics">
+                <PlanMetric label="Gruppen" value={previewPlan.groupCount} />
+                <PlanMetric label="Weiter je Gruppe" value={`Top ${previewPlan.qualifiersPerGroup}`} />
+                <PlanMetric label="K.O.-Feld" value={previewPlan.knockoutSize} />
+                <PlanMetric label="Start" value={roundName(previewPlan.knockoutSize, 0)} />
+              </div>
+            )}
+            {previewPlan?.adjustedFromGroupCount && (
+              <p className="plan-card__adjustment">
+                ✦ {previewPlan.adjustedFromGroupCount} Gruppen ergeben kein gleichmäßiges Zweierpotenz-K.O.-Feld. Die App
+                passt deshalb beim Auslosen automatisch auf {previewPlan.groupCount} Gruppen an.
+              </p>
+            )}
+          </div>
+
           <p className="muted">
-            Die Teilnehmer werden zufällig und möglichst gleichmäßig verteilt. Bei einer Neuauslosung werden KDA-Werte
-            und K.-o.-Bäume bewusst zurückgesetzt.
+            Pro Gruppe ziehen mindestens die Top 2 weiter, aber niemals mehr als 50&nbsp;% der Gruppe. Das Gesamtfeld wird
+            automatisch auf 2, 4, 8, 16 oder maximal 32 Spieler gebracht.
           </p>
         </section>
 
@@ -330,7 +448,10 @@ function App() {
           <div className="section-heading">
             <div>
               <span className="step">03</span>
-              <h2>Punktesystem</h2>
+              <div>
+                <p className="section-kicker">three games · one ranking</p>
+                <h2>KDA-Punktesystem</h2>
+              </div>
             </div>
           </div>
           <div className="score-rules">
@@ -340,170 +461,244 @@ function App() {
             <div className="rule"><strong>+3</strong><span>wenn Kills + Assists &gt; Deaths</span></div>
             <div className="rule rule--negative"><strong>−3</strong><span>wenn Kills + Assists &lt; Deaths</span></div>
           </div>
-          <p className="formula">Rundenpunkte = K + A − 1,5 × D + Bonus/Malus. Bei Gleichstand K + A = D gibt es 0 Zusatzpunkte.</p>
+          <p className="formula">Rundenpunkte = K + A − 1,5 × D + Bonus/Malus · Bei K + A = D gibt es keinen Zusatz.</p>
         </section>
 
         {state.groups.length === 0 ? (
           <section className="panel empty-state empty-state--large">
-            Erstelle zuerst Gruppen. Danach erscheinen hier KDA-Erfassung, Ranglisten und K.-o.-Bäume.
+            Erstelle zuerst Gruppen. Danach erscheinen hier die drei KDA-Spiele, Ranglisten und die gemeinsame K.-o.-Phase.
           </section>
         ) : (
-          state.groups.map((group) => {
-            const standings = buildStandings(group, state.participants, state.stats)
-            const qualifiedCount = qualifierCount(group.participantIds.length)
-            const bracket = state.brackets[group.id]
-            const championId =
-              group.participantIds.length === 1
-                ? group.participantIds[0]
-                : bracket?.rounds.at(-1)?.[0]?.winnerId ?? null
+          <>
+            {state.groups.map((group) => {
+              const standings = buildStandings(group, state.participants, state.stats)
+              const qualifiedCount = activePlan?.qualifiersPerGroup ?? 0
 
-            return (
-              <section className="panel group-panel" key={group.id}>
-                <div className="section-heading group-title-row">
-                  <div>
-                    <span className="step">{group.name}</span>
-                    <h2>{group.participantIds.length} Spieler</h2>
+              return (
+                <section className="panel group-panel" key={group.id}>
+                  <div className="section-heading group-title-row">
+                    <div>
+                      <span className="group-letter">{group.name.replace('Gruppe ', '')}</span>
+                      <div>
+                        <p className="section-kicker">{group.name}</p>
+                        <h2>{group.participantIds.length} Spieler</h2>
+                      </div>
+                    </div>
+                    {qualifiedCount > 0 && <div className="qualification-badge">Top {qualifiedCount} → K.O. ♡</div>}
                   </div>
-                  {championId && <div className="champion-badge">🏆 {participantMap.get(championId)?.name ?? 'Sieger'}</div>}
-                </div>
 
-                {group.participantIds.length === 0 ? (
-                  <div className="empty-state">Diese Gruppe ist leer.</div>
-                ) : (
-                  <>
-                    <h3>Gruppenphase · 3 Spiele</h3>
-                    <div className="stats-wrap">
-                      <table className="stats-table">
-                        <thead>
-                          <tr>
-                            <th rowSpan={2}>Spieler</th>
-                            {[1, 2, 3].map((round) => <th colSpan={4} key={round}>Spiel {round}</th>)}
-                            <th rowSpan={2}>Gesamt</th>
-                          </tr>
-                          <tr>
-                            {[1, 2, 3].flatMap((round) => [
-                              <th key={`${round}-k`}>K</th>,
-                              <th key={`${round}-a`}>A</th>,
-                              <th key={`${round}-d`}>D</th>,
-                              <th key={`${round}-p`}>Pkt.</th>,
-                            ])}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {group.participantIds.map((participantId) => {
-                            const participant = participantMap.get(participantId)
-                            const participantStats = state.stats[participantId] ?? emptyParticipantStats()
-                            const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round), 0)
-                            return (
-                              <tr key={participantId}>
-                                <th className="player-cell">{participant?.name ?? 'Unbekannt'}</th>
-                                {participantStats.rounds.flatMap((round, roundIndex) => [
-                                  <td key={`${participantId}-${roundIndex}-k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,
-                                  <td key={`${participantId}-${roundIndex}-a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,
-                                  <td key={`${participantId}-${roundIndex}-d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,
-                                  <td className={calculateRoundScore(round) < 0 ? 'points points--negative' : 'points'} key={`${participantId}-${roundIndex}-p`}>
-                                    {formatPoints(calculateRoundScore(round))}
-                                  </td>,
-                                ])}
-                                <td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td>
-                              </tr>
-                            )
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div className="standings-section">
-                      <div className="subheading-row">
-                        <div>
-                          <h3>Rangliste & Qualifikation</h3>
-                          <p className="muted">
-                            {qualifiedCount === 0
-                              ? 'Keine Qualifikation möglich.'
-                              : qualifiedCount === 1
-                                ? 'Einzelspieler ist automatisch Gruppensieger.'
-                                : `Top ${qualifiedCount} qualifizieren sich für ${roundName(qualifiedCount, 0)}.`}
-                          </p>
-                        </div>
-                        {qualifiedCount >= 2 && (
-                          <button className="button button--secondary" onClick={() => generateBracket(group.id)}>
-                            {bracket ? 'K.-o.-Baum neu setzen' : 'K.-o.-Baum erstellen'}
-                          </button>
-                        )}
+                  {group.participantIds.length === 0 ? (
+                    <div className="empty-state">Diese Gruppe ist leer.</div>
+                  ) : (
+                    <>
+                      <h3>Gruppenphase · 3 Spiele</h3>
+                      <div className="stats-wrap">
+                        <table className="stats-table">
+                          <thead>
+                            <tr>
+                              <th rowSpan={2}>Spieler</th>
+                              {[1, 2, 3].map((round) => <th colSpan={4} key={round}>Game {round}</th>)}
+                              <th rowSpan={2}>Gesamt</th>
+                            </tr>
+                            <tr>
+                              {[1, 2, 3].flatMap((round) => [
+                                <th key={`${round}-k`}>K</th>,
+                                <th key={`${round}-a`}>A</th>,
+                                <th key={`${round}-d`}>D</th>,
+                                <th key={`${round}-p`}>Pkt.</th>,
+                              ])}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {group.participantIds.map((participantId) => {
+                              const participant = participantMap.get(participantId)
+                              const participantStats = state.stats[participantId] ?? emptyParticipantStats()
+                              const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round), 0)
+                              return (
+                                <tr key={participantId}>
+                                  <th className="player-cell">{participant?.name ?? 'Unbekannt'}</th>
+                                  {participantStats.rounds.flatMap((round, roundIndex) => [
+                                    <td key={`${participantId}-${roundIndex}-k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,
+                                    <td key={`${participantId}-${roundIndex}-a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,
+                                    <td key={`${participantId}-${roundIndex}-d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,
+                                    <td className={calculateRoundScore(round) < 0 ? 'points points--negative' : 'points'} key={`${participantId}-${roundIndex}-p`}>
+                                      {formatPoints(calculateRoundScore(round))}
+                                    </td>,
+                                  ])}
+                                  <td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td>
+                                </tr>
+                              )
+                            })}
+                          </tbody>
+                        </table>
                       </div>
 
-                      <div className="standings-list">
-                        {standings.map((row, index) => (
-                          <div className={`standing ${index < qualifiedCount ? 'standing--qualified' : ''}`} key={row.participantId}>
-                            <span className="standing__rank">{index + 1}</span>
-                            <strong>{row.name}</strong>
-                            <span className="standing__kda">{row.kills} K · {row.assists} A · {row.deaths} D</span>
-                            <span className={row.totalPoints < 0 ? 'standing__points standing__points--negative' : 'standing__points'}>
-                              {formatPoints(row.totalPoints)} Pkt.
-                            </span>
-                            {index < qualifiedCount && <span className="qualified-tag">Q</span>}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {bracket && bracket.rounds.length > 0 && (
-                      <div className="bracket-section">
+                      <div className="standings-section">
                         <div className="subheading-row">
                           <div>
-                            <h3>K.-o.-Phase</h3>
-                            <p className="muted">Sieger eines Spiels auswählen; die nächste Runde wird automatisch befüllt.</p>
+                            <h3>Rangliste</h3>
+                            <p className="muted">
+                              {qualifiedCount > 0
+                                ? `Die Top ${qualifiedCount} sind aktuell für die gemeinsame K.-o.-Phase qualifiziert.`
+                                : 'Für die aktuelle Gruppenkonstellation ist keine regelkonforme K.-o.-Phase möglich.'}
+                            </p>
                           </div>
                         </div>
-                        <div className="bracket">
-                          {bracket.rounds.map((round, roundIndex) => (
-                            <div className="bracket-round" key={`${group.id}-round-${roundIndex}`}>
-                              <h4>{roundName(bracket.qualifierIds.length, roundIndex)}</h4>
-                              <div className="round-matches">
-                                {round.map((match, matchIndex) => {
-                                  const player1 = match.player1Id ? participantMap.get(match.player1Id)?.name : null
-                                  const player2 = match.player2Id ? participantMap.get(match.player2Id)?.name : null
-                                  const ready = Boolean(match.player1Id && match.player2Id)
-                                  return (
-                                    <div className="match-card" key={match.id}>
-                                      <span className="match-number">Spiel {matchIndex + 1}</span>
-                                      <div className={match.winnerId === match.player1Id ? 'match-player match-player--winner' : 'match-player'}>
-                                        <span>{player1 ?? 'Wartet auf Sieger …'}</span>
-                                      </div>
-                                      <div className={match.winnerId === match.player2Id ? 'match-player match-player--winner' : 'match-player'}>
-                                        <span>{player2 ?? 'Wartet auf Sieger …'}</span>
-                                      </div>
-                                      <label className="winner-select-label">
-                                        Sieger
-                                        <select
-                                          className="winner-select"
-                                          disabled={!ready}
-                                          value={match.winnerId ?? ''}
-                                          onChange={(event) => selectWinner(group.id, roundIndex, matchIndex, event.target.value)}
-                                        >
-                                          <option value="">– auswählen –</option>
-                                          {match.player1Id && <option value={match.player1Id}>{player1}</option>}
-                                          {match.player2Id && <option value={match.player2Id}>{player2}</option>}
-                                        </select>
-                                      </label>
-                                    </div>
-                                  )
-                                })}
-                              </div>
+
+                        <div className="standings-list">
+                          {standings.map((row, index) => (
+                            <div className={`standing ${index < qualifiedCount ? 'standing--qualified' : ''}`} key={row.participantId}>
+                              <span className="standing__rank">{index + 1}</span>
+                              <strong>{row.name}</strong>
+                              <span className="standing__kda">{row.kills} K · {row.assists} A · {row.deaths} D</span>
+                              <span className={row.totalPoints < 0 ? 'standing__points standing__points--negative' : 'standing__points'}>
+                                {formatPoints(row.totalPoints)} Pkt.
+                              </span>
+                              {index < qualifiedCount && <span className="qualified-tag">Q</span>}
                             </div>
                           ))}
                         </div>
                       </div>
-                    )}
-                  </>
-                )}
-              </section>
-            )
-          })
+                    </>
+                  )}
+                </section>
+              )
+            })}
+
+            <section className="panel knockout-panel" id="ko-phase">
+              <div className="knockout-panel__glow" />
+              <div className="section-heading knockout-heading">
+                <div>
+                  <span className="step">04</span>
+                  <div>
+                    <p className="section-kicker">now it gets serious ✦</p>
+                    <h2>Gemeinsame K.-o.-Phase</h2>
+                  </div>
+                </div>
+                {activePlan && <span className="counter counter--accent">{activePlan.knockoutSize} Plätze</span>}
+              </div>
+
+              {activePlan ? (
+                <>
+                  <div className="ko-explainer">
+                    <div>
+                      <strong>{roundName(activePlan.knockoutSize, 0)}</strong>
+                      <span>Start-Runde</span>
+                    </div>
+                    <div>
+                      <strong>Top {activePlan.qualifiersPerGroup}</strong>
+                      <span>pro Gruppe</span>
+                    </div>
+                    <div>
+                      <strong>≤ 50 %</strong>
+                      <span>jeder Gruppe</span>
+                    </div>
+                    <div>
+                      <strong>Cross-Group</strong>
+                      <span>starke Seeds vs. schwächere Seeds</span>
+                    </div>
+                  </div>
+
+                  <div className="ko-action-row">
+                    <div>
+                      <h3>Setzliste aus der Gruppenphase</h3>
+                      <p className="muted">
+                        Bei Top 2 gilt exakt: Gruppenerster gegen Gruppenzweiten einer anderen Gruppe. Wenn Top 4 oder
+                        mehr weiterkommen, werden die oberen Platzierungen analog gegen niedrigere Platzierungen anderer
+                        Gruppen gesetzt.
+                      </p>
+                    </div>
+                    <button className="button button--ko" onClick={generateGlobalBracket}>
+                      {state.knockoutBracket ? 'K.O. neu setzen' : 'K.O.-Phase erstellen'}
+                    </button>
+                  </div>
+
+                  <div className="qualified-overview">
+                    {state.groups.map((group) => {
+                      const standings = buildStandings(group, state.participants, state.stats).slice(0, activePlan.qualifiersPerGroup)
+                      return (
+                        <div className="qualified-group" key={`qualified-${group.id}`}>
+                          <span>{group.name}</span>
+                          {standings.map((row, index) => (
+                            <div key={row.participantId}>
+                              <b>{index + 1}.</b> {row.name}
+                            </div>
+                          ))}
+                        </div>
+                      )
+                    })}
+                  </div>
+
+                  {championId && (
+                    <div className="champion-card">
+                      <span>˚ʚ♡ɞ˚</span>
+                      <p>Feelings Champion</p>
+                      <strong>{participantMap.get(championId)?.name ?? 'Sieger'}</strong>
+                      <small>ggs ♡</small>
+                    </div>
+                  )}
+
+                  {state.knockoutBracket && state.knockoutBracket.rounds.length > 0 && (
+                    <div className="bracket-section">
+                      <div className="bracket">
+                        {state.knockoutBracket.rounds.map((round, roundIndex) => (
+                          <div className="bracket-round" key={`ko-round-${roundIndex}`}>
+                            <div className="round-title">
+                              <span>✦</span>
+                              <h4>{roundName(state.knockoutBracket?.qualifierIds.length ?? 0, roundIndex)}</h4>
+                            </div>
+                            <div className="round-matches">
+                              {round.map((match, matchIndex) => {
+                                const player1 = match.player1Id ? participantMap.get(match.player1Id)?.name : null
+                                const player2 = match.player2Id ? participantMap.get(match.player2Id)?.name : null
+                                const ready = Boolean(match.player1Id && match.player2Id)
+                                return (
+                                  <div className="match-card" key={match.id}>
+                                    <span className="match-number">Match {matchIndex + 1}</span>
+                                    <div className={match.winnerId === match.player1Id ? 'match-player match-player--winner' : 'match-player'}>
+                                      <span className="match-player__name">{player1 ?? 'Wartet auf Sieger …'}</span>
+                                      {match.player1Id && <small>{qualifierLabel(match.player1Id)}</small>}
+                                    </div>
+                                    <div className="versus">vs</div>
+                                    <div className={match.winnerId === match.player2Id ? 'match-player match-player--winner' : 'match-player'}>
+                                      <span className="match-player__name">{player2 ?? 'Wartet auf Sieger …'}</span>
+                                      {match.player2Id && <small>{qualifierLabel(match.player2Id)}</small>}
+                                    </div>
+                                    <label className="winner-select-label">
+                                      Sieger
+                                      <select
+                                        className="winner-select"
+                                        disabled={!ready}
+                                        value={match.winnerId ?? ''}
+                                        onChange={(event: ChangeEvent<HTMLSelectElement>) => selectWinner(roundIndex, matchIndex, event.target.value)}
+                                      >
+                                        <option value="">– auswählen –</option>
+                                        {match.player1Id && <option value={match.player1Id}>{player1}</option>}
+                                        {match.player2Id && <option value={match.player2Id}>{player2}</option>}
+                                      </select>
+                                    </label>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="empty-state">
+                  Diese Teilnehmer-/Gruppenzahl erfüllt die Regeln noch nicht. Mindestens 4 Teilnehmer sind erforderlich.
+                </div>
+              )}
+            </section>
+          </>
         )}
 
         <section className="panel danger-panel">
           <div>
+            <p className="section-kicker">fresh start</p>
             <h2>Turnier zurücksetzen</h2>
             <p className="muted">Löscht alle lokal gespeicherten Teilnehmer, Statistiken, Gruppen und K.-o.-Ergebnisse.</p>
           </div>
@@ -512,8 +707,20 @@ function App() {
       </main>
 
       <footer className="footer">
-        <div className="container">Das Feelings-Turnier · Daten werden nur in diesem Browser gespeichert.</div>
+        <div className="container footer__inner">
+          <span>Das Feelings-Turnier ˚ʚ♡ɞ˚</span>
+          <span>Daten bleiben lokal in diesem Browser.</span>
+        </div>
       </footer>
+    </div>
+  )
+}
+
+function PlanMetric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="plan-metric">
+      <strong>{value}</strong>
+      <span>{label}</span>
     </div>
   )
 }
@@ -527,7 +734,7 @@ function StatInput({ value, onChange }: { value: number; onChange: (value: strin
       step="1"
       inputMode="numeric"
       value={value}
-      onChange={(event) => onChange(event.target.value)}
+      onChange={(event: ChangeEvent<HTMLInputElement>) => onChange(event.target.value)}
     />
   )
 }

@@ -1,24 +1,29 @@
-# Das Feelings-Turnier
+# Das Feelings-Turnier · Brume Edition
 
-Eine browserbasierte Turnierverwaltung für Gruppenphase, KDA-Wertung und automatisch erzeugte K.-o.-Bäume.
+Browserbasierte Turnierverwaltung mit Gruppenphase, KDA-Wertung und einer gemeinsamen Fußball-artigen K.-o.-Phase. Das Interface nutzt eine weiche Pastell-/Blush-Ästhetik mit Hearts, Sparkles und Community-Vibes.
 
 ## Funktionen
 
-- Beliebig viele Teilnehmer hinzufügen oder als Liste einfügen
-- Teilnehmer zufällig auf **1 bis 10 Gruppen** verteilen
+- Teilnehmer einzeln oder als Liste hinzufügen
+- Wunschwert von **1 bis 10 Gruppen** auswählen
+- Gruppenzahl bei Bedarf automatisch auf eine K.-o.-kompatible Zahl anpassen
 - Pro Teilnehmer **3 Spiele der Gruppenphase** erfassen
 - KDA-Punktesystem automatisch berechnen
 - Rangliste mit Tie-Breakern erzeugen
-- Automatisch passende K.-o.-Phase pro Gruppe erstellen
-- Sieger manuell auswählen und automatisch in die nächste Runde übernehmen
-- Turnierstand im Browser (`localStorage`) speichern
-- Turnierstand als JSON exportieren und wieder importieren
-- Responsive Oberfläche für Desktop, Tablet und Smartphone
-- Automatisches Deployment über GitHub Pages
+- Gemeinsame K.-o.-Phase nach der Gruppenphase
+- K.-o.-Feld mit **2, 4, 8, 16 oder maximal 32 Spielern**
+- Mindestens **Top 2 pro Gruppe**, aber niemals mehr als **50 % der Gruppe**
+- Gruppensieger werden gegen niedriger gesetzte Spieler aus **anderen Gruppen** gesetzt
+- Bei Top 2 gilt exakt: **1. einer Gruppe gegen 2. einer anderen Gruppe**
+- Sieger auswählen und automatisch in die nächste Runde übernehmen
+- Turnierstand lokal im Browser speichern
+- JSON-Export und -Import
+- Responsive Darstellung für Desktop und Smartphone
+- GitHub-Pages-Deployment per Actions
 
 ## Punktesystem
 
-Pro Spiel/Runde gilt:
+Pro Spiel gilt:
 
 ```text
 Grundpunkte = Kills + Assists - (Deaths × 1,5)
@@ -40,21 +45,47 @@ Bei gleicher Gesamtpunktzahl wird sortiert nach:
 2. weniger Deaths
 3. Name alphabetisch
 
-## Qualifikation und K.-o.-Phase
+## Automatische Gruppen- und K.-o.-Planung
 
-Die K.-o.-Phase wird pro Gruppe aus der Rangliste erstellt. Es qualifiziert sich die größte Zweierpotenz, die nicht größer als die Gruppengröße ist.
+Die App sucht eine Kombination, die alle Regeln gleichzeitig erfüllt:
 
-Beispiele:
+1. mindestens zwei Qualifizierte pro Gruppe,
+2. höchstens 50 % einer Gruppe qualifizieren sich,
+3. alle Gruppen schicken gleich viele Spieler weiter,
+4. das gesamte K.-o.-Feld ist eine Zweierpotenz,
+5. maximal 32 Spieler kommen in die K.-o.-Phase.
 
-| Gruppengröße | Qualifiziert | Erste K.-o.-Runde |
-| ---: | ---: | --- |
-| 1 | 1 | automatisch Gruppensieger |
-| 2–3 | 2 | Finale |
-| 4–7 | 4 | Halbfinale |
-| 8–15 | 8 | Viertelfinale |
-| 16–31 | 16 | Achtelfinale |
+Kann die ausgewählte Gruppenzahl diese Bedingungen nicht erfüllen, reduziert die App die Gruppenzahl automatisch.
 
-Die Setzliste folgt der Gruppenrangliste. Hohe Seeds treffen in der ersten Runde auf niedrige Seeds.
+### Beispiel: 50 Teilnehmer, Wunsch 10 Gruppen
+
+10 Gruppen würden bei mindestens zwei Qualifizierten 20 K.-o.-Teilnehmer ergeben. 20 ist kein reguläres K.-o.-Feld.
+
+Die App plant deshalb automatisch:
+
+```text
+50 Teilnehmer
+→ 8 Gruppen
+→ Top 2 pro Gruppe
+→ 16 Qualifizierte
+→ Achtelfinale
+```
+
+Im Achtelfinale wird ein Gruppenerster gegen einen Gruppenzweiten einer anderen Gruppe gesetzt.
+
+### Größeres Beispiel
+
+Bei 64 Teilnehmern und 8 Gruppen sind 8 Spieler je Gruppe vorhanden. Maximal 50 % dürfen weiterkommen, daher können Top 4 je Gruppe qualifiziert werden:
+
+```text
+64 Teilnehmer
+→ 8 Gruppen
+→ Top 4 pro Gruppe
+→ 32 Qualifizierte
+→ Sechzehntelfinale
+```
+
+Die oberen Platzierungen werden dann gegen niedrigere Platzierungen anderer Gruppen gesetzt, z. B. Rang 1 gegen Rang 4 und Rang 2 gegen Rang 3.
 
 ## Lokal starten
 
@@ -65,8 +96,6 @@ npm install
 npm run dev
 ```
 
-Danach die von Vite angezeigte lokale URL im Browser öffnen.
-
 ## Produktions-Build testen
 
 ```bash
@@ -76,41 +105,27 @@ npm run preview
 
 ## Auf GitHub Pages veröffentlichen
 
-1. Neues GitHub-Repository erstellen, z. B. `das-feelings-turnier`.
-2. Alle Dateien aus diesem Projekt in das Repository hochladen.
-3. Sicherstellen, dass der Standard-Branch `main` heißt.
-4. Unter **Settings → Pages → Build and deployment → Source** die Option **GitHub Actions** auswählen.
-5. Einen Commit auf `main` pushen.
-6. Der Workflow `.github/workflows/deploy.yml` baut und veröffentlicht die Seite automatisch.
+1. Dateien in das Repository hochladen.
+2. Standard-Branch `main` verwenden.
+3. Unter **Settings → Pages → Build and deployment → Source** `GitHub Actions` auswählen.
+4. `.github/workflows/static.yml` in das Repository übernehmen.
+5. Auf `main` committen/pushen.
 
-Die Vite-Konfiguration verwendet `base: './'`, deshalb funktioniert der Build auch in einem GitHub-Pages-Projektpfad.
+Der Workflow installiert die npm-Abhängigkeiten, baut die Vite-App und veröffentlicht ausschließlich den erzeugten `dist`-Ordner.
 
-## Projektstruktur
+## Geänderte Kern-Dateien
 
 ```text
-.
-├── .github/
-│   └── workflows/
-│       └── deploy.yml
-├── public/
-│   └── favicon.svg
-├── src/
-│   ├── lib/
-│   │   ├── scoring.ts
-│   │   └── tournament.ts
-│   ├── App.tsx
-│   ├── main.tsx
-│   ├── styles.css
-│   └── types.ts
-├── .gitignore
-├── index.html
-├── package.json
-├── tsconfig.app.json
-├── tsconfig.json
-├── tsconfig.node.json
-└── vite.config.ts
+.github/workflows/static.yml
+public/favicon.svg
+src/App.tsx
+src/styles.css
+src/types.ts
+src/lib/tournament.ts
+README.md
+index.html
 ```
 
 ## Datenspeicherung
 
-Die App benötigt kein Backend. Der aktuelle Turnierstand liegt ausschließlich im `localStorage` des Browsers. Für Backups oder einen Gerätewechsel kann der Zustand über **Turnier exportieren** als JSON gespeichert und über **Turnier importieren** wieder eingelesen werden.
+Die App benötigt kein Backend. Der Turnierstand liegt im `localStorage` des Browsers. Für Backups oder Gerätewechsel kann der Zustand als JSON exportiert und später wieder importiert werden.

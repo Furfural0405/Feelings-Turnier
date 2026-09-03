@@ -35,6 +35,7 @@ export type QualificationPlan = {
   knockoutSize: number
   adjusted: boolean
   smallestGroupSize: number
+  smallTournamentException: boolean
 }
 
 export type QualifiedPlayer = {

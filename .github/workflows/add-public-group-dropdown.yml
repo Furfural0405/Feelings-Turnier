@@ -1,0 +1,75 @@
+name: Add public group match dropdown
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/add-public-group-dropdown.yml'
+      - 'scripts/add_public_group_dropdown.py'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: "public-group-dropdown-patch"
+  cancel-in-progress: false
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+
+    env:
+      VITE_SUPABASE_URL: https://rwmzxgnbndoeioqksnyn.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_REhjSoFql5jeIPjI3mBwmw_zCjDuSAv
+
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Apply public group dropdown
+        run: python scripts/add_public_group_dropdown.py
+
+      - name: Verify feature
+        run: |
+          grep -q 'className="public-group-matches"' src/App.tsx
+          grep -q 'Einzelbegegnungen anzeigen' src/App.tsx
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build website
+        run: npm run build
+
+      - name: Commit tested change
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx src/styles.css
+          if git diff --cached --quiet; then
+            echo "Dropdown ist bereits eingebaut."
+          else
+            git commit -m "Hide public group matches behind dropdown"
+            git push origin HEAD:main
+          fi
+
+      - name: Trigger normal Pages deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail-with-body             -X POST             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer ${GH_TOKEN}"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/static.yml/dispatches"             -d '{"ref":"main"}'

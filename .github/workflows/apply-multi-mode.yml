@@ -1,0 +1,84 @@
+name: Apply 1v1-5v5 multi mode tournament
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apply-multi-mode.yml'
+      - 'scripts/apply_multi_mode.py'
+      - 'supabase/multi_mode_migration.sql'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: multi-mode-upgrade
+  cancel-in-progress: false
+
+jobs:
+  patch-build-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    env:
+      VITE_SUPABASE_URL: https://rwmzxgnbndoeioqksnyn.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_REhjSoFql5jeIPjI3mBwmw_zCjDuSAv
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Apply multi-mode upgrade
+        run: python scripts/apply_multi_mode.py
+
+      - name: Commit upgraded tournament code
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx src/types.ts src/lib/tournament.ts src/styles.css supabase/setup.sql supabase/multi_mode_migration.sql
+          if git diff --cached --quiet; then
+            echo "Multi-mode upgrade is already present."
+          else
+            git commit -m "Add unified 1v1 to 5v5 tournament modes"
+            git push origin HEAD:main
+          fi
+
+      - name: Verify patched feature markers
+        run: |
+          grep -q "Turniermodus & Wertung" src/App.tsx
+          grep -q "createGroupMatches" src/lib/tournament.ts
+          grep -q "groupMatches" src/types.ts
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build website
+        run: npm run build
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload built website
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./dist
+
+      - name: Deploy upgraded website
+        id: deployment
+        uses: actions/deploy-pages@v5

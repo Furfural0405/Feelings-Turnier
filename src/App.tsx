@@ -1607,7 +1607,7 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
                 })}</div>
                 <h3>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} · {competition.teamSize === 1 ? 'pro Spieler' : 'als Team-KDA'}</h3>
                 <div className="stats-wrap"><table className="stats-table" style={{ minWidth: `${Math.max(780, 180 + state.groupRoundCount * 190)}px` }}>
-                  <thead><tr><th>{competition.teamSize === 1 ? 'Spieler' : 'Team'}</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>S{round} K</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>KDA gesamt</th></tr></thead>
+                  <thead><tr><th>{competition.teamSize === 1 ? 'Spieler' : 'Team'}</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>{state.groupRoundCount === 1 ? 'K' : `S${round} K`}</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>KDA gesamt</th></tr></thead>
                   <tbody>{group.participantIds.map((participantId) => {
                     const participantStats = normalizeParticipantStats(state.stats[participantId], state.groupRoundCount)
                     const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)

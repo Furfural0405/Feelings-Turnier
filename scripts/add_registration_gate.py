@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "src" / "App.tsx"
 TYPES = ROOT / "src" / "types.ts"
 STYLES = ROOT / "src" / "styles.css"
+TOURNAMENT = ROOT / "src" / "lib" / "tournament.ts"
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
     if new in text:
@@ -17,6 +18,7 @@ def main():
     app = APP.read_text(encoding="utf-8")
     types = TYPES.read_text(encoding="utf-8")
     styles = STYLES.read_text(encoding="utf-8")
+    tournament = TOURNAMENT.read_text(encoding="utf-8")
 
     types = replace_once(
         types,
@@ -274,9 +276,28 @@ def main():
     if ".registration-status{" not in styles:
         styles = styles.rstrip() + "\n" + css.strip() + "\n"
 
+    tournament = replace_once(
+        tournament,
+        """const DEFAULT_COMPETITION: CompetitionSettings = {
+  teamSize: 1,
+  winPoints: 3,
+  drawPoints: 1,
+  lossPoints: 0,
+}""",
+        """const DEFAULT_COMPETITION: CompetitionSettings = {
+  teamSize: 1,
+  winPoints: 3,
+  drawPoints: 1,
+  lossPoints: 0,
+  registrationEnabled: true,
+}""",
+        "DEFAULT_COMPETITION in tournament.ts",
+    )
+
     APP.write_text(app, encoding="utf-8")
     TYPES.write_text(types, encoding="utf-8")
     STYLES.write_text(styles, encoding="utf-8")
+    TOURNAMENT.write_text(tournament, encoding="utf-8")
     print("Anmeldeschalter und automatische Gruppen-Sperre erfolgreich eingebaut.")
 
 if __name__ == "__main__":

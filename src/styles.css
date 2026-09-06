@@ -276,3 +276,10 @@ h4{color:#d5c6ea;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
   .public-match-row em{grid-column:1/-1;text-align:center}
   .public-ko-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
+.public-group-matches{margin:12px 0 18px;border:1px solid rgba(145,71,255,.16);border-radius:12px;background:rgba(13,9,22,.35);overflow:hidden}
+.public-group-matches summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 15px;cursor:pointer;list-style:none;font-weight:700;color:#f5eaff;user-select:none}
+.public-group-matches summary::-webkit-details-marker{display:none}
+.public-group-matches summary::after{content:'⌄';font-size:1rem;color:#cdb3ff;transition:transform .18s ease}
+.public-group-matches[open] summary::after{transform:rotate(180deg)}
+.public-group-matches summary small{margin-left:auto;color:var(--muted);font-size:.72rem;font-weight:600}
+.public-group-matches .public-match-list{margin:0;padding:0 12px 12px}

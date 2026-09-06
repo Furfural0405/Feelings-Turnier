@@ -1792,25 +1792,31 @@ function PublicGroupSection({
       <span className="counter">{group.participantIds.length} {competition.teamSize === 1 ? 'SPIELER' : 'TEAMS'}</span>
     </div>
 
-    <div className="public-match-list">
-      {groupMatches.map((match) => {
-        const left = participantMap.get(match.player1Id)?.name ?? 'Unbekannt'
-        const right = participantMap.get(match.player2Id)?.name ?? 'Unbekannt'
-        const result = match.result === 'player1'
-          ? `Sieg · ${left}`
-          : match.result === 'player2'
-            ? `Sieg · ${right}`
-            : match.result === 'draw'
-              ? 'Unentschieden'
-              : 'Noch kein Ergebnis'
-        return <div className="public-match-row" key={match.id}>
-          <strong>{left}</strong>
-          <span className="public-match-vs">vs</span>
-          <strong>{right}</strong>
-          <em>{result}</em>
-        </div>
-      })}
-    </div>
+    <details className="public-group-matches">
+      <summary>
+        <span>Einzelbegegnungen anzeigen</span>
+        <small>{groupMatches.length} Match{groupMatches.length === 1 ? '' : 'es'}</small>
+      </summary>
+      <div className="public-match-list">
+        {groupMatches.map((match) => {
+          const left = participantMap.get(match.player1Id)?.name ?? 'Unbekannt'
+          const right = participantMap.get(match.player2Id)?.name ?? 'Unbekannt'
+          const result = match.result === 'player1'
+            ? `Sieg · ${left}`
+            : match.result === 'player2'
+              ? `Sieg · ${right}`
+              : match.result === 'draw'
+                ? 'Unentschieden'
+                : 'Noch kein Ergebnis'
+          return <div className="public-match-row" key={match.id}>
+            <strong>{left}</strong>
+            <span className="public-match-vs">vs</span>
+            <strong>{right}</strong>
+            <em>{result}</em>
+          </div>
+        })}
+      </div>
+    </details>
 
     <div className="stats-wrap">
       <table className="stats-table public-standings-table">

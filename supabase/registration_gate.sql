@@ -1,0 +1,4 @@
+-- Bereits auf dem produktiven Supabase-Projekt angewendet.
+-- Serverseitige Turnier-Anmeldesperre.
+-- Siehe Migrationen add_tournament_registration_gate und
+-- keep_registration_closed_on_backup_restore.

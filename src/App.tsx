@@ -597,10 +597,6 @@ function App() {
 
   async function saveCompetitionSettings() {
     if (!supabase || !isAdmin || !user) return
-    if (state.participants.length > 0 && competition.teamSize !== state.participants[0]?.teamSize) {
-      setNotice('Der Turniermodus kann erst geändert werden, wenn alle vorhandenen Teilnehmer gelöscht wurden.')
-      return
-    }
     const cleaned = normalizeCompetition(competition)
     setCompetition(cleaned)
     setSiteSaving(true)
@@ -609,17 +605,98 @@ function App() {
       .update({ competition: cleaned, updated_at: new Date().toISOString(), updated_by: user.id })
       .eq('id', 1)
     setSiteSaving(false)
-    setNotice(error ? `Turniermodus konnte nicht gespeichert werden: ${error.message}` : `Turniermodus ${cleaned.teamSize}vs${cleaned.teamSize} und Tabellenwertung wurden veröffentlicht.`)
+    setNotice(error
+      ? `Tabellenwertung konnte nicht gespeichert werden: ${error.message}`
+      : 'Tabellenwertung wurde veröffentlicht.')
   }
 
-  function changeTeamSize(teamSize: number) {
-    if (state.participants.length > 0) {
-      setNotice('Zum Wechsel des Turniermodus bitte zuerst alle Teilnehmer löschen.')
+  async function changeTeamSize(rawTeamSize: number) {
+    if (!supabase || !isAdmin || !user) return
+
+    const nextTeamSize = clamp(rawTeamSize, 1, 5)
+    if (nextTeamSize === competition.teamSize) {
+      setNotice(`${nextTeamSize}vs${nextTeamSize} ist bereits der aktive Turniermodus.`)
       return
     }
-    setCompetition((current) => ({ ...current, teamSize: clamp(teamSize, 1, 5) }))
+
+    const participantCount = state.participants.length
+    if (participantCount > 0) {
+      const confirmed = window.confirm(
+        `Turniermodus wirklich von ${competition.teamSize}vs${competition.teamSize} auf ${nextTeamSize}vs${nextTeamSize} ändern?
+
+Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Match-Ergebnisse, KDA-Daten und die K.O.-Phase gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.`,
+      )
+      if (!confirmed) return
+    }
+
+    setSiteSaving(true)
+
+    if (participantCount > 0) {
+      if (saveTimer.current) {
+        window.clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+
+      const { error: deleteError } = await supabase
+        .from('participants')
+        .delete()
+        .not('id', 'is', null)
+
+      if (deleteError) {
+        setSiteSaving(false)
+        setNotice(`Moduswechsel abgebrochen: Anmeldungen konnten nicht gelöscht werden: ${deleteError.message}`)
+        return
+      }
+
+      const clearedState: TournamentState = {
+        ...state,
+        participants: [],
+        groups: [],
+        groupMatches: [],
+        stats: {},
+        knockoutBracket: null,
+      }
+
+      const { error: stateError } = await supabase
+        .from('tournament_state')
+        .upsert({
+          id: 1,
+          payload: storedState(clearedState),
+          updated_at: new Date().toISOString(),
+          updated_by: user.id,
+        }, { onConflict: 'id' })
+
+      setState(clearedState)
+
+      if (stateError) {
+        setSiteSaving(false)
+        setNotice(`Anmeldungen wurden gelöscht, der Turnierstand konnte aber nicht vollständig zurückgesetzt werden: ${stateError.message}`)
+        return
+      }
+    }
+
+    const nextCompetition = normalizeCompetition({ ...competition, teamSize: nextTeamSize })
+    const { error } = await supabase
+      .from('site_settings')
+      .update({
+        competition: nextCompetition,
+        updated_at: new Date().toISOString(),
+        updated_by: user.id,
+      })
+      .eq('id', 1)
+
+    setSiteSaving(false)
+
+    if (error) {
+      setNotice(`Turniermodus konnte nicht gespeichert werden: ${error.message}`)
+      return
+    }
+
+    setCompetition(nextCompetition)
     setTeamMembers([])
     setNewName('')
+    setBulkNames('')
+    setNotice(`Moduswechsel gespeichert. ${nextTeamSize}vs${nextTeamSize} ist jetzt aktiv.`)
   }
 
   async function saveScoringSettings() {
@@ -1329,14 +1406,26 @@ function App() {
                 <div className="settings-content">
                   <p className="muted">Wähle 1vs1 bis 5vs5. Alle Modi verwenden dieselbe Matchwertung: Ergebnisse sind Hauptkriterium, KDA ist Tie-Breaker. Sind in einer Gruppe überhaupt keine Ergebnisse eingetragen, wird automatisch ausschließlich nach KDA sortiert.</p>
                   <div className="settings-form-grid">
-                    <label>Turniermodus<select className="select-input" value={competition.teamSize} onChange={(event) => changeTeamSize(Number(event.target.value))}>{[1,2,3,4,5].map((size) => <option key={size} value={size}>{size}vs{size}{size === 1 ? ' · Einzelspieler' : ` · ${size} Spieler pro Team`}</option>)}</select></label>
+                    <div className="settings-wide">
+                      <span className="field-label">Turniermodus · aktiv: {competition.teamSize}vs{competition.teamSize}</span>
+                      <div className="admin-tools__actions" style={{ justifyContent: 'flex-start', marginTop: '8px' }}>
+                        {[1,2,3,4,5].map((size) => <button
+                          type="button"
+                          key={size}
+                          className={competition.teamSize === size ? 'button button--twitch' : 'button button--ghost'}
+                          disabled={siteSaving}
+                          onClick={() => void changeTeamSize(size)}
+                        >{size}vs{size}{size === 1 ? ' · Einzel' : ' · Team'}</button>)}
+                      </div>
+                      <span className="muted" style={{ marginTop: '8px', display: 'block' }}>Modus wird sofort gespeichert.</span>
+                    </div>
                     <label>Punkte pro Sieg<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.winPoints} onChange={(event) => setCompetition((current) => ({ ...current, winPoints: Number(event.target.value || 0) }))} /></label>
                     <label>Punkte pro Unentschieden<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.drawPoints} onChange={(event) => setCompetition((current) => ({ ...current, drawPoints: Number(event.target.value || 0) }))} /></label>
                     <label>Punkte pro Niederlage<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.lossPoints} onChange={(event) => setCompetition((current) => ({ ...current, lossPoints: Number(event.target.value || 0) }))} /></label>
                   </div>
-                  {state.participants.length > 0 && <p className="settings-warning">Der Modus ist gesperrt, solange Anmeldungen vorhanden sind. Zum Wechsel zwischen 1vs1 und Teammodus zuerst alle Teilnehmer/Teams löschen.</p>}
+                  {state.participants.length > 0 && <p className="settings-warning">Beim Wechsel des Turniermodus erscheint eine Sicherheitsabfrage. Nach Bestätigung werden vorhandene Anmeldungen, Gruppen, Match-Ergebnisse, KDA-Daten und die K.O.-Phase automatisch zurückgesetzt.</p>}
                   <div className="plan-card"><span>WERTUNGSLOGIK</span><strong>Sieg {formatPoints(competition.winPoints)} · Unentschieden {formatPoints(competition.drawPoints)} · Niederlage {formatPoints(competition.lossPoints)}</strong><em>Bei Punktgleichheit entscheidet KDA. Ohne eingetragene Match-Ergebnisse gilt ausschließlich KDA.</em></div>
-                  <button className="button button--twitch" disabled={siteSaving} onClick={() => void saveCompetitionSettings()}>{siteSaving ? 'Wird gespeichert …' : 'Turniermodus & Wertung veröffentlichen'}</button>
+                  <button className="button button--twitch" disabled={siteSaving} onClick={() => void saveCompetitionSettings()}>{siteSaving ? 'Wird gespeichert …' : 'Tabellenwertung veröffentlichen'}</button>
                 </div>
               ) : settingsTab === 'scoring' ? (
                 <div className="settings-content">

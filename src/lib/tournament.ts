@@ -19,6 +19,7 @@ const DEFAULT_COMPETITION: CompetitionSettings = {
   winPoints: 3,
   drawPoints: 1,
   lossPoints: 0,
+  registrationEnabled: true,
 }
 
 export function shuffle<T>(items: T[]): T[] {

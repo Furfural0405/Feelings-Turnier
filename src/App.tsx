@@ -89,7 +89,7 @@ const DEFAULT_HERO: HeroContent = {
 
 const DEFAULT_SCORING: ScoringWeights = DEFAULT_SCORING_WEIGHTS
 
-const DEFAULT_COMPETITION: CompetitionSettings = { teamSize: 1, winPoints: 3, drawPoints: 1, lossPoints: 0 }
+const DEFAULT_COMPETITION: CompetitionSettings = { teamSize: 1, winPoints: 3, drawPoints: 1, lossPoints: 0, registrationEnabled: true }
 
 const DEFAULT_BACKGROUND: SiteBackgroundSettings = {
   enabled: false,
@@ -164,6 +164,7 @@ function normalizeCompetition(value: unknown): CompetitionSettings {
     winPoints: safeNumber(candidate.winPoints, 3),
     drawPoints: safeNumber(candidate.drawPoints, 1),
     lossPoints: safeNumber(candidate.lossPoints, 0),
+    registrationEnabled: candidate.registrationEnabled !== false,
   }
 }
 
@@ -260,6 +261,7 @@ function App() {
 
   const isAdmin = Boolean(profile?.approved && profile.role === 'admin')
   const isCreator = Boolean(isAdmin && profile?.is_creator)
+  const registrationIsOpen = competition.registrationEnabled && state.groups.length === 0
   const participantMap = useMemo(
     () => new Map(state.participants.map((participant) => [participant.id, participant])),
     [state.participants],
@@ -597,7 +599,10 @@ function App() {
 
   async function saveCompetitionSettings() {
     if (!supabase || !isAdmin || !user) return
-    const cleaned = normalizeCompetition(competition)
+    const cleaned = normalizeCompetition({
+      ...competition,
+      registrationEnabled: competition.registrationEnabled && state.groups.length === 0,
+    })
     setCompetition(cleaned)
     setSiteSaving(true)
     const { error } = await supabase
@@ -608,6 +613,35 @@ function App() {
     setNotice(error
       ? `Tabellenwertung konnte nicht gespeichert werden: ${error.message}`
       : 'Tabellenwertung wurde veröffentlicht.')
+  }
+
+  async function setRegistrationEnabled(enabled: boolean) {
+    if (!supabase || !isAdmin) return
+
+    if (enabled && state.groups.length > 0) {
+      setNotice('Die Anmeldung kann nicht geöffnet werden, solange eine Gruppenphase existiert. Setze zuerst das Turnier zurück.')
+      return
+    }
+
+    setSiteSaving(true)
+    const { error } = await supabase.rpc('set_tournament_registration_enabled', {
+      p_enabled: enabled,
+    })
+    setSiteSaving(false)
+
+    if (error) {
+      setNotice(`Anmeldestatus konnte nicht geändert werden: ${error.message}`)
+      return
+    }
+
+    setCompetition((current) => ({ ...current, registrationEnabled: enabled }))
+    if (!enabled) {
+      setNewName('')
+      setTeamMembers([])
+    }
+    setNotice(enabled
+      ? '✓ Turnier-Anmeldung ist jetzt geöffnet.'
+      : 'Turnier-Anmeldung wurde geschlossen.')
   }
 
   async function changeTeamSize(rawTeamSize: number) {
@@ -790,6 +824,19 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
       return false
     }
 
+    const { data: registrationOpenRaw, error: registrationError } = await supabase.rpc('current_tournament_registration_open')
+    if (registrationError) {
+      setNotice(`Anmeldestatus konnte nicht geprüft werden: ${registrationError.message}`)
+      return false
+    }
+    if (registrationOpenRaw !== true) {
+      setCompetition((current) => ({ ...current, registrationEnabled: false }))
+      setNewName('')
+      setTeamMembers([])
+      setNotice('Die Turnier-Anmeldung ist aktuell geschlossen.')
+      return false
+    }
+
     if (cleaned.length < 2 || cleaned.length > 40) {
       setNotice(competition.teamSize === 1
         ? 'Der Gamer-Tag muss zwischen 2 und 40 Zeichen lang sein.'
@@ -861,6 +908,10 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
 
   async function addBulkParticipants() {
     if (!supabase || !isAdmin || competition.teamSize !== 1) return
+    if (!registrationIsOpen) {
+      setNotice('Die Turnier-Anmeldung ist aktuell geschlossen.')
+      return
+    }
     const names = bulkNames.split(/[\n,;]+/).map((name) => name.trim()).filter(Boolean)
     if (!names.length) return
     const { error } = await supabase.from('participants').insert(names.map((name) => ({ name, team_size: 1, members: [name], submitted_by: user?.id ?? null })))
@@ -972,10 +1023,18 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
     setNotice(`Gruppenphase auf ${groupRoundCount} KDA-Runde${groupRoundCount === 1 ? '' : 'n'} eingestellt. Die K.O.-Phase wurde ggf. zurückgesetzt.`)
   }
 
-  function createGroups() {
-    if (!isAdmin) return
+  async function createGroups() {
+    if (!isAdmin || !supabase) return
     if (state.participants.length < 1) {
       setNotice('Bitte zuerst Teilnehmer hinzufügen.')
+      return
+    }
+
+    const { error: registrationError } = await supabase.rpc('set_tournament_registration_enabled', {
+      p_enabled: false,
+    })
+    if (registrationError) {
+      setNotice(`Gruppenphase konnte nicht gestartet werden, weil die Anmeldung nicht geschlossen werden konnte: ${registrationError.message}`)
       return
     }
 
@@ -985,10 +1044,15 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
     const stats = Object.fromEntries(state.participants.map((participant) => [participant.id, emptyParticipantStats(state.groupRoundCount)]))
     const groupMatches = createGroupMatches(groups)
 
+    setCompetition((current) => ({ ...current, registrationEnabled: false }))
+    setNewName('')
+    setTeamMembers([])
     setState((current) => ({ ...current, groupCount: actualGroupCount, groups, groupMatches, stats, knockoutBracket: null }))
-    if (!plan) setNotice('Gruppen erstellt. Eine K.O.-Phase benötigt mindestens 4 Teilnehmer.')
-    else if (plan.adjusted) setNotice(`Automatisch angepasst: ${plan.requestedGroupCount} → ${plan.groupCount} Gruppen. ${planText(plan)}`)
-    else setNotice(`Gruppen erstellt. ${planText(plan)}`)
+
+    const prefix = 'Anmeldung automatisch geschlossen. '
+    if (!plan) setNotice(`${prefix}Gruppen erstellt. Eine K.O.-Phase benötigt mindestens 4 Teilnehmer.`)
+    else if (plan.adjusted) setNotice(`${prefix}Automatisch angepasst: ${plan.requestedGroupCount} → ${plan.groupCount} Gruppen. ${planText(plan)}`)
+    else setNotice(`${prefix}Gruppen erstellt. ${planText(plan)}`)
   }
 
   function updateGroupMatchResult(matchId: string, result: GroupMatchResult) {
@@ -1350,16 +1414,22 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
         <section className="panel registration-panel" id="teilnehmer">
           <div className="section-heading"><div><span className="step">01</span><h2>{competition.teamSize === 1 ? 'Teilnehmer' : 'Teams'}</h2></div>{isAdmin && <span className="counter">{state.participants.length} angemeldet</span>}</div>
           <div className="mode-banner"><strong>{competition.teamSize}vs{competition.teamSize}</strong><span>{competition.teamSize === 1 ? 'Einzelspieler-Modus' : `Teammodus · ${competition.teamSize} Personen pro Team`}</span></div>
-          <p className="muted">{isAdmin ? 'Als Admin siehst du alle Anmeldungen und kannst sie verwalten.' : competition.teamSize === 1 ? 'Trage deinen Gamer-Tag ein. Bereits angemeldete Namen bleiben für Besucher unsichtbar.' : `Trage zuerst den Teamnamen und anschließend alle ${competition.teamSize} Teammitglieder ein. Bereits angemeldete Teams bleiben für Besucher unsichtbar.`}</p>
-          <div className="input-row participant-submit">
-            <input className="text-input" value={newName} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && competition.teamSize === 1) void addSingleParticipant() }} placeholder={competition.teamSize === 1 ? 'Name oder Gamer-Tag' : 'Teamname'} maxLength={40} />
-            <button className="button" onClick={() => void addSingleParticipant()}>{competition.teamSize === 1 ? 'Für Turnier anmelden' : 'Team anmelden'}</button>
+          <div className={registrationIsOpen ? 'registration-status registration-status--open' : 'registration-status registration-status--closed'}>
+            <strong>{registrationIsOpen ? 'ANMELDUNG GEÖFFNET' : 'ANMELDUNG GESCHLOSSEN'}</strong>
+            <span>{registrationIsOpen ? `Anmeldungen für ${competition.teamSize}vs${competition.teamSize} sind möglich.` : state.groups.length > 0 ? 'Die Gruppenphase wurde bereits erstellt. Weitere Anmeldungen sind gesperrt.' : 'Ein Admin hat die Turnier-Anmeldung aktuell deaktiviert.'}</span>
           </div>
-          {competition.teamSize > 1 && newName.trim() && <div className="team-member-fields">
-            {Array.from({ length: competition.teamSize }, (_, index) => <label key={index}>Spieler {index + 1}<input className="text-input" value={teamMembers[index] ?? ''} onChange={(event) => setTeamMembers((current) => Array.from({ length: competition.teamSize }, (_, memberIndex) => memberIndex === index ? event.target.value : current[memberIndex] ?? ''))} placeholder="Name oder Gamer-Tag" maxLength={40} /></label>)}
-          </div>}
+          {registrationIsOpen ? <>
+            <p className="muted">{isAdmin ? 'Als Admin siehst du alle Anmeldungen und kannst sie verwalten.' : competition.teamSize === 1 ? 'Trage deinen Gamer-Tag ein. Bereits angemeldete Namen bleiben für Besucher unsichtbar.' : `Trage zuerst den Teamnamen und anschließend alle ${competition.teamSize} Teammitglieder ein. Bereits angemeldete Teams bleiben für Besucher unsichtbar.`}</p>
+            <div className="input-row participant-submit">
+              <input className="text-input" value={newName} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && competition.teamSize === 1) void addSingleParticipant() }} placeholder={competition.teamSize === 1 ? 'Name oder Gamer-Tag' : 'Teamname'} maxLength={40} />
+              <button className="button" onClick={() => void addSingleParticipant()}>{competition.teamSize === 1 ? 'Für Turnier anmelden' : 'Team anmelden'}</button>
+            </div>
+            {competition.teamSize > 1 && newName.trim() && <div className="team-member-fields">
+              {Array.from({ length: competition.teamSize }, (_, index) => <label key={index}>Spieler {index + 1}<input className="text-input" value={teamMembers[index] ?? ''} onChange={(event) => setTeamMembers((current) => Array.from({ length: competition.teamSize }, (_, memberIndex) => memberIndex === index ? event.target.value : current[memberIndex] ?? ''))} placeholder="Name oder Gamer-Tag" maxLength={40} /></label>)}
+            </div>}
+          </> : <div className="registration-closed"><strong>Für dieses Turnier sind derzeit keine weiteren Anmeldungen möglich.</strong><span>Der Anmeldestatus wird von der Turnierleitung verwaltet.</span></div>}
           {isAdmin && <>
-            {competition.teamSize === 1 && <details className="bulk-add"><summary>Mehrere Teilnehmer hinzufügen</summary><textarea className="text-area" value={bulkNames} onChange={(event) => setBulkNames(event.target.value)} placeholder="Eine Person pro Zeile" /><button className="button button--secondary" onClick={() => void addBulkParticipants()}>Liste übernehmen</button></details>}
+            {competition.teamSize === 1 && registrationIsOpen && <details className="bulk-add"><summary>Mehrere Teilnehmer hinzufügen</summary><textarea className="text-area" value={bulkNames} onChange={(event) => setBulkNames(event.target.value)} placeholder="Eine Person pro Zeile" /><button className="button button--secondary" onClick={() => void addBulkParticipants()}>Liste übernehmen</button></details>}
             <div className="admin-toolbar"><div className="admin-tools__actions"><button className="button button--ghost" disabled={clearingParticipants} onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button><button className="button button--danger" disabled={clearingParticipants || state.participants.length === 0} onClick={() => void removeAllParticipants()}>{clearingParticipants ? 'Wird gelöscht …' : `Alle ${competition.teamSize === 1 ? 'Teilnehmer' : 'Teams'} löschen`}</button></div></div>
             <div className="chips">{state.participants.map((participant, index) => <div className="chip chip--team" key={participant.id}><span className="chip__index">{index + 1}</span><span><strong>{participant.name}</strong>{participant.teamSize > 1 && <small>{participant.members.join(' · ')}</small>}</span><button className="chip__remove" onClick={() => void removeParticipant(participant.id)} aria-label={`${participant.name} entfernen`}>×</button></div>)}</div>
           </>}
@@ -1455,6 +1525,19 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
                       </div>
                       <span className="muted" style={{ marginTop: '8px', display: 'block' }}>Modus wird sofort gespeichert.</span>
                     </div>
+                    <div className="settings-wide registration-admin-card">
+                      <div>
+                        <span className="field-label">Turnier-Anmeldung</span>
+                        <strong>{registrationIsOpen ? 'Geöffnet' : 'Geschlossen'}</strong>
+                        <small>{state.groups.length > 0 ? 'Gruppenphase aktiv · Anmeldung ist fest gesperrt.' : competition.registrationEnabled ? 'Neue Teilnehmer/Teams können sich anmelden.' : 'Neue Anmeldungen sind manuell deaktiviert.'}</small>
+                      </div>
+                      <button
+                        type="button"
+                        className={registrationIsOpen ? 'button button--danger' : 'button button--twitch'}
+                        disabled={siteSaving || (!registrationIsOpen && state.groups.length > 0)}
+                        onClick={() => void setRegistrationEnabled(!registrationIsOpen)}
+                      >{registrationIsOpen ? 'Anmeldung schließen' : state.groups.length > 0 ? 'Durch Gruppenphase gesperrt' : 'Anmeldung öffnen'}</button>
+                    </div>
                     <label>Punkte pro Sieg<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.winPoints} onChange={(event) => setCompetition((current) => ({ ...current, winPoints: Number(event.target.value || 0) }))} /></label>
                     <label>Punkte pro Unentschieden<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.drawPoints} onChange={(event) => setCompetition((current) => ({ ...current, drawPoints: Number(event.target.value || 0) }))} /></label>
                     <label>Punkte pro Niederlage<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.lossPoints} onChange={(event) => setCompetition((current) => ({ ...current, lossPoints: Number(event.target.value || 0) }))} /></label>
@@ -1504,7 +1587,7 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
               <div className="group-controls">
                 <label className="field-label" htmlFor="group-count">Gewünschte Gruppen</label>
                 <select id="group-count" className="select-input" value={state.groupCount} onChange={(event) => setState((current) => ({ ...current, groupCount: Number(event.target.value), knockoutBracket: null }))}>{Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}</select>
-                <button className="button" onClick={createGroups}>Gruppen automatisch erstellen</button>
+                <button className="button" onClick={() => void createGroups()}>Gruppen automatisch erstellen</button>
               </div>
               <div className="plan-card"><span>AUTO PLAN</span><strong>{planText(previewPlan)}</strong><em>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} · {competition.teamSize}vs{competition.teamSize}</em></div>
             </section>

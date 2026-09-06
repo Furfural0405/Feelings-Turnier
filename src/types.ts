@@ -36,6 +36,7 @@ export type CompetitionSettings = {
   winPoints: number
   drawPoints: number
   lossPoints: number
+  registrationEnabled: boolean
 }
 
 export type StandingRow = {

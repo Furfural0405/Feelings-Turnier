@@ -29,6 +29,7 @@ export type GroupMatch = {
   player1Id: string
   player2Id: string
   result: GroupMatchResult
+  stats?: Record<string, ParticipantStats>
 }
 
 export type CompetitionSettings = {

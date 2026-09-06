@@ -1087,6 +1087,17 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
         participant.id,
         normalizeParticipantStats(current.stats[participant.id], groupRoundCount),
       ])),
+      groupMatches: current.groupMatches.map((match) => {
+        if (!match.stats) return match
+        const participantIds = [match.player1Id, match.player2Id]
+        return {
+          ...match,
+          stats: Object.fromEntries(participantIds.map((participantId) => [
+            participantId,
+            normalizeParticipantStats(match.stats?.[participantId], groupRoundCount),
+          ])),
+        }
+      }),
       knockoutBracket: null,
     }))
     setNotice(`Gruppenphase auf ${groupRoundCount} KDA-Runde${groupRoundCount === 1 ? '' : 'n'} eingestellt. Die K.O.-Phase wurde ggf. zurückgesetzt.`)
@@ -1129,6 +1140,36 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
     setState((current) => ({
       ...current,
       groupMatches: current.groupMatches.map((match) => match.id === matchId ? { ...match, result } : match),
+      knockoutBracket: null,
+    }))
+  }
+
+  function updateGroupMatchStat(
+    matchId: string,
+    participantId: string,
+    roundIndex: number,
+    field: keyof RoundStats,
+    rawValue: string,
+  ) {
+    if (!isAdmin) return
+    const value = Math.max(0, Math.trunc(Number(rawValue) || 0))
+
+    setState((current) => ({
+      ...current,
+      groupMatches: current.groupMatches.map((match) => {
+        if (match.id !== matchId) return match
+        const participantStats = normalizeParticipantStats(match.stats?.[participantId], current.groupRoundCount)
+        const rounds = participantStats.rounds.map((round, index) =>
+          index === roundIndex ? { ...round, [field]: value } : { ...round },
+        )
+        return {
+          ...match,
+          stats: {
+            ...(match.stats ?? {}),
+            [participantId]: { rounds },
+          },
+        }
+      }),
       knockoutBracket: null,
     }))
   }
@@ -1660,7 +1701,7 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
                 </div>
               ) : (
                 <div className="settings-content">
-                  <p className="muted">Lege fest, aus wie vielen KDA-Runden die Gruppenphase besteht. Erlaubt sind 1 bis 7 Runden.</p>
+                  <p className="muted">{competition.teamSize === 1 ? 'Lege fest, aus wie vielen KDA-Runden die Gruppenphase besteht. Erlaubt sind 1 bis 7 Runden.' : 'Lege fest, wie viele KDA-Runden pro Begegnung für beide Teams erfasst werden. Die Gruppentabelle summiert alle Begegnungen automatisch auf. Erlaubt sind 1 bis 7 Runden.'}</p>
                   <div className="round-setting-card">
                     <label className="field-label" htmlFor="group-round-count">KDA-Runden in der Gruppenphase</label>
                     <select id="group-round-count" className="select-input" value={state.groupRoundCount} onChange={(event) => setGroupRoundCount(Number(event.target.value))}>
@@ -1694,18 +1735,76 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
                 <div className="group-match-list">{groupMatches.map((match) => {
                   const left = participantMap.get(match.player1Id)?.name ?? 'Unbekannt'
                   const right = participantMap.get(match.player2Id)?.name ?? 'Unbekannt'
-                  return <div className="group-match-row" key={match.id}><strong>{left}</strong><span>vs</span><strong>{right}</strong><select className="select-input select-input--compact" value={match.result ?? ''} onChange={(event) => updateGroupMatchResult(match.id, (event.target.value || null) as GroupMatchResult)}><option value="">Noch kein Ergebnis</option><option value="player1">Sieg · {left}</option><option value="draw">Unentschieden</option><option value="player2">Sieg · {right}</option></select></div>
+                  if (competition.teamSize === 1) {
+                    return <div className="group-match-row" key={match.id}><strong>{left}</strong><span>vs</span><strong>{right}</strong><select className="select-input select-input--compact" value={match.result ?? ''} onChange={(event) => updateGroupMatchResult(match.id, (event.target.value || null) as GroupMatchResult)}><option value="">Noch kein Ergebnis</option><option value="player1">Sieg · {left}</option><option value="draw">Unentschieden</option><option value="player2">Sieg · {right}</option></select></div>
+                  }
+
+                  return <div className="group-match-card" key={match.id}>
+                    <div className="group-match-row">
+                      <strong>{left}</strong>
+                      <span>vs</span>
+                      <strong>{right}</strong>
+                      <select className="select-input select-input--compact" value={match.result ?? ''} onChange={(event) => updateGroupMatchResult(match.id, (event.target.value || null) as GroupMatchResult)}>
+                        <option value="">Noch kein Ergebnis</option>
+                        <option value="player1">Sieg · {left}</option>
+                        <option value="draw">Unentschieden</option>
+                        <option value="player2">Sieg · {right}</option>
+                      </select>
+                    </div>
+                    <div className="group-match-kda">
+                      {[match.player1Id, match.player2Id].map((participantId) => {
+                        const participantStats = normalizeParticipantStats(match.stats?.[participantId], state.groupRoundCount)
+                        const matchKdaPoints = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)
+                        return <div className="group-match-kda__team" key={participantId}>
+                          <div className="group-match-kda__title">
+                            <strong>{participantMap.get(participantId)?.name ?? 'Unbekannt'}</strong>
+                            <span className={matchKdaPoints < 0 ? 'points points--negative' : 'points'}>{formatPoints(matchKdaPoints)} KDA-Pkt.</span>
+                          </div>
+                          <div className="group-match-kda__rounds">
+                            {participantStats.rounds.map((round, roundIndex) => <div className="group-match-kda__round" key={`${participantId}-${roundIndex}`}>
+                              {state.groupRoundCount > 1 && <span className="group-match-kda__round-label">Runde {roundIndex + 1}</span>}
+                              <label>K<StatInput value={round.kills} onChange={(value) => updateGroupMatchStat(match.id, participantId, roundIndex, 'kills', value)} /></label>
+                              <label>A<StatInput value={round.assists} onChange={(value) => updateGroupMatchStat(match.id, participantId, roundIndex, 'assists', value)} /></label>
+                              <label>D<StatInput value={round.deaths} onChange={(value) => updateGroupMatchStat(match.id, participantId, roundIndex, 'deaths', value)} /></label>
+                              <span className={calculateRoundScore(round, scoringWeights) < 0 ? 'group-match-kda__points points--negative' : 'group-match-kda__points'}>{formatPoints(calculateRoundScore(round, scoringWeights))} Pkt.</span>
+                            </div>)}
+                          </div>
+                        </div>
+                      })}
+                    </div>
+                  </div>
                 })}</div>
-                <h3>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} · {competition.teamSize === 1 ? 'pro Spieler' : 'als Team-KDA'}</h3>
-                <div className="stats-wrap"><table className="stats-table" style={{ minWidth: `${Math.max(780, 180 + state.groupRoundCount * 190)}px` }}>
-                  <thead><tr><th>{competition.teamSize === 1 ? 'Spieler' : 'Team'}</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>{state.groupRoundCount === 1 ? 'K' : `S${round} K`}</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>KDA gesamt</th></tr></thead>
-                  <tbody>{group.participantIds.map((participantId) => {
-                    const participantStats = normalizeParticipantStats(state.stats[participantId], state.groupRoundCount)
-                    const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)
-                    return <tr key={participantId}><th className="player-cell">{participantMap.get(participantId)?.name ?? 'Unbekannt'}</th>{participantStats.rounds.flatMap((round, roundIndex) => [<td key={`${roundIndex}k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,<td key={`${roundIndex}a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,<td key={`${roundIndex}d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,<td className={calculateRoundScore(round, scoringWeights) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round, scoringWeights))}</td>])}<td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td></tr>
-                  })}</tbody>
-                </table></div>
-                <div className="standings-list">{standings.map((row, index) => <div className={`standing ${index < qualified ? 'standing--qualified' : ''}`} key={row.participantId}><span className="standing__rank">{index + 1}</span><strong>{row.name}</strong>{usesResults && <span className="standing__record">{row.wins} S · {row.draws} U · {row.losses} N · {formatPoints(row.matchPoints)} Tab.-Pkt.</span>}<span className="standing__kda">KDA {formatPoints(row.totalPoints)} · {row.kills} K · {row.assists} A · {row.deaths} D</span>{index < qualified && <span className="qualified-tag">Q</span>}</div>)}</div>
+                {competition.teamSize === 1 ? <>
+                  <h3>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} · pro Spieler</h3>
+                  <div className="stats-wrap"><table className="stats-table" style={{ minWidth: `${Math.max(780, 180 + state.groupRoundCount * 190)}px` }}>
+                    <thead><tr><th>Spieler</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>{state.groupRoundCount === 1 ? 'K' : `S${round} K`}</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>KDA gesamt</th></tr></thead>
+                    <tbody>{group.participantIds.map((participantId) => {
+                      const participantStats = normalizeParticipantStats(state.stats[participantId], state.groupRoundCount)
+                      const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)
+                      return <tr key={participantId}><th className="player-cell">{participantMap.get(participantId)?.name ?? 'Unbekannt'}</th>{participantStats.rounds.flatMap((round, roundIndex) => [<td key={`${roundIndex}k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,<td key={`${roundIndex}a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,<td key={`${roundIndex}d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,<td className={calculateRoundScore(round, scoringWeights) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round, scoringWeights))}</td>])}<td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td></tr>
+                    })}</tbody>
+                  </table></div>
+                  <div className="standings-list">{standings.map((row, index) => <div className={`standing ${index < qualified ? 'standing--qualified' : ''}`} key={row.participantId}><span className="standing__rank">{index + 1}</span><strong>{row.name}</strong>{usesResults && <span className="standing__record">{row.wins} S · {row.draws} U · {row.losses} N · {formatPoints(row.matchPoints)} Tab.-Pkt.</span>}<span className="standing__kda">KDA {formatPoints(row.totalPoints)} · {row.kills} K · {row.assists} A · {row.deaths} D</span>{index < qualified && <span className="qualified-tag">Q</span>}</div>)}</div>
+                </> : <>
+                  <h3>Gruppentabelle · aufsummierte Match-KDA</h3>
+                  <div className="stats-wrap">
+                    <table className="stats-table team-group-summary">
+                      <thead><tr><th>#</th><th>Team</th><th>Siege</th><th>Unentschieden</th><th>Niederlagen</th><th>Kills</th><th>Deaths</th><th>Assists</th><th>Punkte (S/U/N)</th><th>Punkte (KDA)</th></tr></thead>
+                      <tbody>{standings.map((row, index) => <tr key={row.participantId}>
+                        <td>{index + 1}</td>
+                        <th className="player-cell">{row.name}</th>
+                        <td>{row.wins}</td>
+                        <td>{row.draws}</td>
+                        <td>{row.losses}</td>
+                        <td>{row.kills}</td>
+                        <td>{row.deaths}</td>
+                        <td>{row.assists}</td>
+                        <td className="points">{formatPoints(row.matchPoints)}</td>
+                        <td className={row.totalPoints < 0 ? 'points points--negative' : 'points'}>{formatPoints(row.totalPoints)}</td>
+                      </tr>)}</tbody>
+                    </table>
+                  </div>
+                </>}
               </section>
             })}
 

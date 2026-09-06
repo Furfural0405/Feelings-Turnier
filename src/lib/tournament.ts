@@ -79,7 +79,14 @@ export function buildStandings(
 
   const rows = group.participantIds.map((participantId) => {
     const participant = participantMap.get(participantId)
-    const participantStats = stats[participantId] ?? emptyParticipantStats()
+    const matchKdaRounds = matches.flatMap((match) =>
+      match.stats?.[participantId]?.rounds ?? [],
+    )
+    // Teammodi speichern KDA direkt pro Begegnung. Alte Turnierstände ohne
+    // Match-KDA greifen weiterhin auf die bisherige Gruppen-KDA zurück.
+    const participantStats = matchKdaRounds.length > 0
+      ? { rounds: matchKdaRounds }
+      : stats[participantId] ?? emptyParticipantStats()
     const kills = participantStats.rounds.reduce((sum, round) => sum + round.kills, 0)
     const assists = participantStats.rounds.reduce((sum, round) => sum + round.assists, 0)
     const deaths = participantStats.rounds.reduce((sum, round) => sum + round.deaths, 0)

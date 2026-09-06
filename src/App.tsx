@@ -4,6 +4,7 @@ import type { User } from '@supabase/supabase-js'
 import {
   buildStandings,
   createGlobalKnockoutBracket,
+  createGroupMatches,
   createQualificationPlan,
   createQualificationPlanForExistingGroups,
   distributeIntoGroups,
@@ -20,6 +21,8 @@ import {
 import { supabase, supabaseConfigured } from './lib/supabase'
 import type {
   AccessProfile,
+  CompetitionSettings,
+  GroupMatchResult,
   HeroContent,
   KnockoutBracket,
   KnockoutMatch,
@@ -86,6 +89,8 @@ const DEFAULT_HERO: HeroContent = {
 
 const DEFAULT_SCORING: ScoringWeights = DEFAULT_SCORING_WEIGHTS
 
+const DEFAULT_COMPETITION: CompetitionSettings = { teamSize: 1, winPoints: 3, drawPoints: 1, lossPoints: 0 }
+
 const DEFAULT_BACKGROUND: SiteBackgroundSettings = {
   enabled: false,
   url: '',
@@ -106,6 +111,7 @@ const DEFAULT_STATE: TournamentState = {
   groupCount: 2,
   groupRoundCount: 3,
   groups: [],
+  groupMatches: [],
   stats: {},
   knockoutBracket: null,
 }
@@ -147,6 +153,29 @@ function normalizeBackground(value: unknown): SiteBackgroundSettings {
   }
 }
 
+function normalizeCompetition(value: unknown): CompetitionSettings {
+  const candidate = value && typeof value === 'object' ? value as Partial<CompetitionSettings> : {}
+  const safeNumber = (raw: unknown, fallback: number) => {
+    const parsed = Number(raw)
+    return Number.isFinite(parsed) ? Math.max(0, Math.min(20, parsed)) : fallback
+  }
+  return {
+    teamSize: clamp(Number(candidate.teamSize) || 1, 1, 5),
+    winPoints: safeNumber(candidate.winPoints, 3),
+    drawPoints: safeNumber(candidate.drawPoints, 1),
+    lossPoints: safeNumber(candidate.lossPoints, 0),
+  }
+}
+
+function normalizeParticipant(value: unknown): Participant {
+  const candidate = value && typeof value === 'object' ? value as { id?: unknown; name?: unknown; team_size?: unknown; teamSize?: unknown; members?: unknown } : {}
+  const name = String(candidate.name ?? '').trim()
+  const teamSize = clamp(Number(candidate.team_size ?? candidate.teamSize) || 1, 1, 5)
+  const rawMembers = Array.isArray(candidate.members) ? candidate.members.map((member) => String(member).trim()).filter(Boolean) : []
+  const members = teamSize === 1 ? [rawMembers[0] || name] : rawMembers.slice(0, teamSize)
+  return { id: String(candidate.id ?? ''), name, teamSize, members }
+}
+
 function normalizeScoring(value: unknown): ScoringWeights {
   const candidate = value && typeof value === 'object' ? value as Partial<ScoringWeights> : {}
   const safeWeight = (rawValue: unknown, fallback: number) => {
@@ -171,6 +200,7 @@ function normalizeBracket(bracket: KnockoutBracket | null | undefined): Knockout
     qualifierIds: Array.isArray(bracket.qualifierIds) ? bracket.qualifierIds : [],
     rounds: bracket.rounds.map((round) => round.map((match) => ({
       ...match,
+      result: ['player1', 'player2', 'draw'].includes(String(match.result)) ? match.result : null,
       kdaRoundCount: clamp(Number(match.kdaRoundCount) || 1, 1, 3),
       stats: match.stats && typeof match.stats === 'object' ? match.stats : {},
     }))),
@@ -180,7 +210,7 @@ function normalizeBracket(bracket: KnockoutBracket | null | undefined): Knockout
 function planText(plan: QualificationPlan | null): string {
   if (!plan) return 'Ab 4 Teilnehmern kann eine K.O.-Phase erzeugt werden.'
   const override = plan.smallTournamentOverride ? ' · Sonderregel unter 8 Teilnehmern' : ''
-  return `${plan.groupCount} Gruppe${plan.groupCount === 1 ? '' : 'n'} · Top ${plan.qualifiersPerGroup} · ${plan.knockoutSize} Spieler · ${roundName(plan.knockoutSize, 0)}${override}`
+  return `${plan.groupCount} Gruppe${plan.groupCount === 1 ? '' : 'n'} · Top ${plan.qualifiersPerGroup} · ${plan.knockoutSize} Teilnehmer/Teams · ${roundName(plan.knockoutSize, 0)}${override}`
 }
 
 function storedState(state: TournamentState): StoredTournamentState {
@@ -188,6 +218,7 @@ function storedState(state: TournamentState): StoredTournamentState {
     groupCount: state.groupCount,
     groupRoundCount: state.groupRoundCount,
     groups: state.groups,
+    groupMatches: state.groupMatches,
     stats: state.stats,
     knockoutBracket: state.knockoutBracket,
   }
@@ -198,6 +229,8 @@ function App() {
   const [hero, setHero] = useState<HeroContent>(DEFAULT_HERO)
   const [background, setBackground] = useState<SiteBackgroundSettings>(DEFAULT_BACKGROUND)
   const [scoringWeights, setScoringWeights] = useState<ScoringWeights>(DEFAULT_SCORING)
+  const [competition, setCompetition] = useState<CompetitionSettings>(DEFAULT_COMPETITION)
+  const [teamMembers, setTeamMembers] = useState<string[]>([])
   const [user, setUser] = useState<User | null>(null)
   const [profile, setProfile] = useState<AccessProfile | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
@@ -211,7 +244,7 @@ function App() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
-  const [settingsTab, setSettingsTab] = useState<'header' | 'background' | 'scoring' | 'group'>('header')
+  const [settingsTab, setSettingsTab] = useState<'header' | 'background' | 'competition' | 'scoring' | 'group'>('header')
   const [siteSaving, setSiteSaving] = useState(false)
   const [backgroundUploadBusy, setBackgroundUploadBusy] = useState(false)
   const [clearingParticipants, setClearingParticipants] = useState(false)
@@ -386,12 +419,13 @@ function App() {
     if (!supabase) return
     let cancelled = false
     async function loadSiteSettings() {
-      const { data, error } = await supabase!.from('site_settings').select('hero,background,scoring').eq('id', 1).maybeSingle()
+      const { data, error } = await supabase!.from('site_settings').select('hero,background,scoring,competition').eq('id', 1).maybeSingle()
       if (cancelled) return
       if (!error) {
         if (data?.hero) setHero(normalizeHero(data.hero))
         setBackground(normalizeBackground(data?.background))
         setScoringWeights(normalizeScoring(data?.scoring))
+        setCompetition(normalizeCompetition(data?.competition))
       }
     }
     void loadSiteSettings()
@@ -473,7 +507,7 @@ function App() {
     let cancelled = false
     async function loadAdminData() {
       const [participantResult, stateResult, profileResult] = await Promise.all([
-        supabase!.from('participants').select('id,name').order('created_at', { ascending: true }),
+        supabase!.from('participants').select('id,name,team_size,members').order('created_at', { ascending: true }),
         supabase!.from('tournament_state').select('payload').eq('id', 1).maybeSingle(),
         supabase!.from('profiles').select('id,email,approved,role,is_creator,access_status,created_at').order('created_at', { ascending: true }),
       ])
@@ -483,7 +517,7 @@ function App() {
         return
       }
 
-      const participants = (participantResult.data ?? []) as Participant[]
+      const participants = (participantResult.data ?? []).map(normalizeParticipant)
       const payload = (stateResult.data?.payload ?? {}) as Partial<StoredTournamentState>
       const groupRoundCount = clamp(Number(payload.groupRoundCount) || 3, 1, 7)
       const rawStats = payload.stats && typeof payload.stats === 'object' ? payload.stats : {}
@@ -495,6 +529,7 @@ function App() {
         groupCount: clamp(Number(payload.groupCount) || 2, 1, 10),
         groupRoundCount,
         groups: Array.isArray(payload.groups) ? payload.groups : [],
+        groupMatches: Array.isArray(payload.groupMatches) ? payload.groupMatches : [],
         stats: normalizedStats,
         knockoutBracket: normalizeBracket(payload.knockoutBracket),
       })
@@ -527,7 +562,7 @@ function App() {
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current)
     }
-  }, [state.groupCount, state.groupRoundCount, state.groups, state.stats, state.knockoutBracket, isAdmin, adminDataLoaded, user])
+  }, [state.groupCount, state.groupRoundCount, state.groups, state.groupMatches, state.stats, state.knockoutBracket, isAdmin, adminDataLoaded, user])
 
   async function saveHeroSettings() {
     if (!supabase || !isAdmin || !user) return
@@ -558,6 +593,33 @@ function App() {
     setBackground(cleaned)
     setNotice(successMessage)
     return true
+  }
+
+  async function saveCompetitionSettings() {
+    if (!supabase || !isAdmin || !user) return
+    if (state.participants.length > 0 && competition.teamSize !== state.participants[0]?.teamSize) {
+      setNotice('Der Turniermodus kann erst geändert werden, wenn alle vorhandenen Teilnehmer gelöscht wurden.')
+      return
+    }
+    const cleaned = normalizeCompetition(competition)
+    setCompetition(cleaned)
+    setSiteSaving(true)
+    const { error } = await supabase
+      .from('site_settings')
+      .update({ competition: cleaned, updated_at: new Date().toISOString(), updated_by: user.id })
+      .eq('id', 1)
+    setSiteSaving(false)
+    setNotice(error ? `Turniermodus konnte nicht gespeichert werden: ${error.message}` : `Turniermodus ${cleaned.teamSize}vs${cleaned.teamSize} und Tabellenwertung wurden veröffentlicht.`)
+  }
+
+  function changeTeamSize(teamSize: number) {
+    if (state.participants.length > 0) {
+      setNotice('Zum Wechsel des Turniermodus bitte zuerst alle Teilnehmer löschen.')
+      return
+    }
+    setCompetition((current) => ({ ...current, teamSize: clamp(teamSize, 1, 5) }))
+    setTeamMembers([])
+    setNewName('')
   }
 
   async function saveScoringSettings() {
@@ -628,12 +690,12 @@ function App() {
 
   async function refreshParticipants() {
     if (!supabase || !isAdmin) return
-    const { data, error } = await supabase.from('participants').select('id,name').order('created_at', { ascending: true })
+    const { data, error } = await supabase.from('participants').select('id,name,team_size,members').order('created_at', { ascending: true })
     if (error) {
       setNotice(error.message)
       return
     }
-    const participants = (data ?? []) as Participant[]
+    const participants = (data ?? []).map(normalizeParticipant)
     setState((current) => ({
       ...current,
       participants,
@@ -652,14 +714,30 @@ function App() {
       return false
     }
 
-    const { error } = await supabase.from('participants').insert({ name: cleaned, submitted_by: user?.id ?? null })
+    const teamSize = competition.teamSize
+    const members = teamSize === 1
+      ? [cleaned]
+      : Array.from({ length: teamSize }, (_, index) => (teamMembers[index] ?? '').trim())
+
+    if (teamSize > 1 && members.some((member) => member.length < 2)) {
+      setNotice(`Bitte für alle ${teamSize} Teammitglieder einen Namen oder Gamer-Tag eintragen.`)
+      return false
+    }
+
+    const { error } = await supabase.from('participants').insert({
+      name: cleaned,
+      team_size: teamSize,
+      members,
+      submitted_by: user?.id ?? null,
+    })
     if (error) {
-      if (error.code === '23505') setNotice('Dieser Gamer-Tag ist bereits angemeldet.')
+      if (error.code === '23505') setNotice(teamSize === 1 ? 'Dieser Gamer-Tag ist bereits angemeldet.' : 'Dieser Teamname ist bereits angemeldet.')
       else setNotice(`Anmeldung fehlgeschlagen: ${error.message}`)
       return false
     }
 
-    setNotice('✓ Gamer-Tag wurde für das Turnier angemeldet.')
+    setNotice(teamSize === 1 ? '✓ Gamer-Tag wurde für das Turnier angemeldet.' : `✓ Team „${cleaned}“ wurde für das ${teamSize}vs${teamSize}-Turnier angemeldet.`)
+    setTeamMembers([])
     if (isAdmin) await refreshParticipants()
     return true
   }
@@ -669,10 +747,10 @@ function App() {
   }
 
   async function addBulkParticipants() {
-    if (!supabase || !isAdmin) return
+    if (!supabase || !isAdmin || competition.teamSize !== 1) return
     const names = bulkNames.split(/[\n,;]+/).map((name) => name.trim()).filter(Boolean)
     if (!names.length) return
-    const { error } = await supabase.from('participants').insert(names.map((name) => ({ name, submitted_by: user?.id ?? null })))
+    const { error } = await supabase.from('participants').insert(names.map((name) => ({ name, team_size: 1, members: [name], submitted_by: user?.id ?? null })))
     if (error) {
       setNotice(`Liste konnte nicht vollständig übernommen werden: ${error.message}`)
       return
@@ -696,6 +774,7 @@ function App() {
         ...current,
         participants: current.participants.filter((participant) => participant.id !== participantId),
         groups: current.groups.map((group) => ({ ...group, participantIds: group.participantIds.filter((id) => id !== participantId) })),
+        groupMatches: current.groupMatches.filter((match) => match.player1Id !== participantId && match.player2Id !== participantId),
         stats,
         knockoutBracket: null,
       }
@@ -737,6 +816,7 @@ function App() {
       ...state,
       participants: [],
       groups: [],
+      groupMatches: [],
       stats: {},
       knockoutBracket: null,
     }
@@ -753,6 +833,7 @@ function App() {
     setState(clearedState)
     setNewName('')
     setBulkNames('')
+    setTeamMembers([])
     setClearingParticipants(false)
 
     if (stateError) {
@@ -789,11 +870,21 @@ function App() {
     const actualGroupCount = plan?.groupCount ?? Math.max(1, Math.min(state.groupCount, state.participants.length))
     const groups = distributeIntoGroups(state.participants, actualGroupCount)
     const stats = Object.fromEntries(state.participants.map((participant) => [participant.id, emptyParticipantStats(state.groupRoundCount)]))
+    const groupMatches = createGroupMatches(groups)
 
-    setState((current) => ({ ...current, groupCount: actualGroupCount, groups, stats, knockoutBracket: null }))
+    setState((current) => ({ ...current, groupCount: actualGroupCount, groups, groupMatches, stats, knockoutBracket: null }))
     if (!plan) setNotice('Gruppen erstellt. Eine K.O.-Phase benötigt mindestens 4 Teilnehmer.')
     else if (plan.adjusted) setNotice(`Automatisch angepasst: ${plan.requestedGroupCount} → ${plan.groupCount} Gruppen. ${planText(plan)}`)
     else setNotice(`Gruppen erstellt. ${planText(plan)}`)
+  }
+
+  function updateGroupMatchResult(matchId: string, result: GroupMatchResult) {
+    if (!isAdmin) return
+    setState((current) => ({
+      ...current,
+      groupMatches: current.groupMatches.map((match) => match.id === matchId ? { ...match, result } : match),
+      knockoutBracket: null,
+    }))
   }
 
   function updateStat(participantId: string, roundIndex: number, field: keyof RoundStats, rawValue: string) {
@@ -811,13 +902,28 @@ function App() {
       setNotice('Für die aktuelle Konfiguration kann noch keine K.O.-Phase erstellt werden.')
       return
     }
-    const bracket = createGlobalKnockoutBracket(state.groups, state.participants, state.stats, activePlan.qualifiersPerGroup, scoringWeights)
+    const bracket = createGlobalKnockoutBracket(state.groups, state.participants, state.stats, activePlan.qualifiersPerGroup, scoringWeights, state.groupMatches, competition)
     if (bracket.qualifierIds.length !== activePlan.knockoutSize || bracket.rounds.length === 0) {
       setNotice('K.O.-Phase konnte nicht gesetzt werden. Bitte Gruppen neu auslosen.')
       return
     }
     setState((current) => ({ ...current, knockoutBracket: bracket }))
-    setNotice(`${activePlan.knockoutSize} Spieler qualifiziert · ${roundName(activePlan.knockoutSize, 0)} gestartet.`)
+    setNotice(`${activePlan.knockoutSize} ${competition.teamSize === 1 ? 'Spieler' : 'Teams'} qualifiziert · ${roundName(activePlan.knockoutSize, 0)} gestartet.`)
+  }
+
+  function updateKoResult(roundIndex: number, matchIndex: number, result: GroupMatchResult) {
+    if (!isAdmin) return
+    setState((current) => {
+      if (!current.knockoutBracket) return current
+      const rounds = current.knockoutBracket.rounds.map((round) => round.map((match) => ({ ...match })))
+      const target = rounds[roundIndex]?.[matchIndex]
+      if (!target) return current
+      target.result = result
+      let bracket = { ...current.knockoutBracket, rounds }
+      const winnerId = result === 'player1' ? target.player1Id : result === 'player2' ? target.player2Id : null
+      bracket = updateBracketWinner(bracket, roundIndex, matchIndex, winnerId)
+      return { ...current, knockoutBracket: bracket }
+    })
   }
 
   function selectWinner(roundIndex: number, matchIndex: number, winnerId: string) {
@@ -995,7 +1101,7 @@ function App() {
   async function resetTournament() {
     if (!supabase || !isAdmin) return
     if (!window.confirm('Turnierdaten wirklich zurücksetzen? Teilnehmer-Anmeldungen und Header-Inhalte bleiben erhalten.')) return
-    setState((current) => ({ ...DEFAULT_STATE, participants: current.participants }))
+    setState((current) => ({ ...DEFAULT_STATE, participants: current.participants, groupCount: current.groupCount, groupRoundCount: current.groupRoundCount }))
     setNotice('Turnierdaten zurückgesetzt. Teilnehmer und Header-Inhalte wurden behalten.')
   }
 
@@ -1020,6 +1126,7 @@ function App() {
         groupCount: clamp(Number(parsed.groupCount) || 1, 1, 10),
         groupRoundCount,
         groups: parsed.groups ?? [],
+        groupMatches: Array.isArray(parsed.groupMatches) ? parsed.groupMatches : [],
         stats: Object.fromEntries(current.participants.map((participant) => [
           participant.id,
           normalizeParticipantStats(parsed.stats?.[participant.id], groupRoundCount),
@@ -1128,21 +1235,20 @@ function App() {
         {!supabaseConfigured && <div className="setup-warning">Supabase ist noch nicht konfiguriert. Siehe README und <code>.env.example</code>.</div>}
 
         <section className="panel registration-panel" id="teilnehmer">
-          <div className="section-heading"><div><span className="step">01</span><h2>Teilnehmer</h2></div>{isAdmin && <span className="counter">{state.participants.length} angemeldet</span>}</div>
-          <p className="muted">{isAdmin ? 'Als Admin siehst du alle Anmeldungen und kannst Teilnehmer verwalten.' : 'Trage deinen Gamer-Tag ein. Die Namen bereits angemeldeter Personen sind nur für freigeschaltete Admins sichtbar.'}</p>
+          <div className="section-heading"><div><span className="step">01</span><h2>{competition.teamSize === 1 ? 'Teilnehmer' : 'Teams'}</h2></div>{isAdmin && <span className="counter">{state.participants.length} angemeldet</span>}</div>
+          <div className="mode-banner"><strong>{competition.teamSize}vs{competition.teamSize}</strong><span>{competition.teamSize === 1 ? 'Einzelspieler-Modus' : `Teammodus · ${competition.teamSize} Personen pro Team`}</span></div>
+          <p className="muted">{isAdmin ? 'Als Admin siehst du alle Anmeldungen und kannst sie verwalten.' : competition.teamSize === 1 ? 'Trage deinen Gamer-Tag ein. Bereits angemeldete Namen bleiben für Besucher unsichtbar.' : `Trage zuerst den Teamnamen und anschließend alle ${competition.teamSize} Teammitglieder ein. Bereits angemeldete Teams bleiben für Besucher unsichtbar.`}</p>
           <div className="input-row participant-submit">
-            <input className="text-input" value={newName} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void addSingleParticipant() }} placeholder="Name oder Gamer-Tag" maxLength={40} />
-            <button className="button" onClick={() => void addSingleParticipant()}>Für Turnier anmelden</button>
+            <input className="text-input" value={newName} onChange={(event) => setNewName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && competition.teamSize === 1) void addSingleParticipant() }} placeholder={competition.teamSize === 1 ? 'Name oder Gamer-Tag' : 'Teamname'} maxLength={40} />
+            <button className="button" onClick={() => void addSingleParticipant()}>{competition.teamSize === 1 ? 'Für Turnier anmelden' : 'Team anmelden'}</button>
           </div>
+          {competition.teamSize > 1 && newName.trim() && <div className="team-member-fields">
+            {Array.from({ length: competition.teamSize }, (_, index) => <label key={index}>Spieler {index + 1}<input className="text-input" value={teamMembers[index] ?? ''} onChange={(event) => setTeamMembers((current) => Array.from({ length: competition.teamSize }, (_, memberIndex) => memberIndex === index ? event.target.value : current[memberIndex] ?? ''))} placeholder="Name oder Gamer-Tag" maxLength={40} /></label>)}
+          </div>}
           {isAdmin && <>
-            <details className="bulk-add"><summary>Mehrere Teilnehmer hinzufügen</summary><textarea className="text-area" value={bulkNames} onChange={(event) => setBulkNames(event.target.value)} placeholder="Eine Person pro Zeile" /><button className="button button--secondary" onClick={() => void addBulkParticipants()}>Liste übernehmen</button></details>
-            <div className="admin-toolbar">
-              <div className="admin-tools__actions">
-                <button className="button button--ghost" disabled={clearingParticipants} onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button>
-                <button className="button button--danger" disabled={clearingParticipants || state.participants.length === 0} onClick={() => void removeAllParticipants()}>{clearingParticipants ? 'Wird gelöscht …' : 'Alle Teilnehmer löschen'}</button>
-              </div>
-            </div>
-            <div className="chips">{state.participants.map((participant, index) => <div className="chip" key={participant.id}><span className="chip__index">{index + 1}</span><span>{participant.name}</span><button className="chip__remove" onClick={() => void removeParticipant(participant.id)} aria-label={`${participant.name} entfernen`}>×</button></div>)}</div>
+            {competition.teamSize === 1 && <details className="bulk-add"><summary>Mehrere Teilnehmer hinzufügen</summary><textarea className="text-area" value={bulkNames} onChange={(event) => setBulkNames(event.target.value)} placeholder="Eine Person pro Zeile" /><button className="button button--secondary" onClick={() => void addBulkParticipants()}>Liste übernehmen</button></details>}
+            <div className="admin-toolbar"><div className="admin-tools__actions"><button className="button button--ghost" disabled={clearingParticipants} onClick={() => void refreshParticipants()}>Anmeldungen aktualisieren</button><button className="button button--danger" disabled={clearingParticipants || state.participants.length === 0} onClick={() => void removeAllParticipants()}>{clearingParticipants ? 'Wird gelöscht …' : `Alle ${competition.teamSize === 1 ? 'Teilnehmer' : 'Teams'} löschen`}</button></div></div>
+            <div className="chips">{state.participants.map((participant, index) => <div className="chip chip--team" key={participant.id}><span className="chip__index">{index + 1}</span><span><strong>{participant.name}</strong>{participant.teamSize > 1 && <small>{participant.members.join(' · ')}</small>}</span><button className="chip__remove" onClick={() => void removeParticipant(participant.id)} aria-label={`${participant.name} entfernen`}>×</button></div>)}</div>
           </>}
         </section>
 
@@ -1166,6 +1272,7 @@ function App() {
               <div className="settings-tabs" role="tablist" aria-label="Admin Einstellungen">
                 <button className={settingsTab === 'header' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('header')}>Header-Inhalte</button>
                 <button className={settingsTab === 'background' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('background')}>Website-Hintergrund</button>
+                <button className={settingsTab === 'competition' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('competition')}>Turniermodus & Wertung</button>
                 <button className={settingsTab === 'scoring' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('scoring')}>KDA-Gewichtung</button>
                 <button className={settingsTab === 'group' ? 'settings-tab settings-tab--active' : 'settings-tab'} onClick={() => setSettingsTab('group')}>Gruppenphase</button>
               </div>
@@ -1218,6 +1325,19 @@ function App() {
                     <button className="button button--ghost" disabled={siteSaving || backgroundUploadBusy} onClick={() => setBackground(DEFAULT_BACKGROUND)}>Einstellungen auf Standard setzen</button>
                   </div>
                 </div>
+              ) : settingsTab === 'competition' ? (
+                <div className="settings-content">
+                  <p className="muted">Wähle 1vs1 bis 5vs5. Alle Modi verwenden dieselbe Matchwertung: Ergebnisse sind Hauptkriterium, KDA ist Tie-Breaker. Sind in einer Gruppe überhaupt keine Ergebnisse eingetragen, wird automatisch ausschließlich nach KDA sortiert.</p>
+                  <div className="settings-form-grid">
+                    <label>Turniermodus<select className="select-input" value={competition.teamSize} onChange={(event) => changeTeamSize(Number(event.target.value))}>{[1,2,3,4,5].map((size) => <option key={size} value={size}>{size}vs{size}{size === 1 ? ' · Einzelspieler' : ` · ${size} Spieler pro Team`}</option>)}</select></label>
+                    <label>Punkte pro Sieg<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.winPoints} onChange={(event) => setCompetition((current) => ({ ...current, winPoints: Number(event.target.value || 0) }))} /></label>
+                    <label>Punkte pro Unentschieden<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.drawPoints} onChange={(event) => setCompetition((current) => ({ ...current, drawPoints: Number(event.target.value || 0) }))} /></label>
+                    <label>Punkte pro Niederlage<input className="text-input" type="number" min="0" max="20" step="0.5" value={competition.lossPoints} onChange={(event) => setCompetition((current) => ({ ...current, lossPoints: Number(event.target.value || 0) }))} /></label>
+                  </div>
+                  {state.participants.length > 0 && <p className="settings-warning">Der Modus ist gesperrt, solange Anmeldungen vorhanden sind. Zum Wechsel zwischen 1vs1 und Teammodus zuerst alle Teilnehmer/Teams löschen.</p>}
+                  <div className="plan-card"><span>WERTUNGSLOGIK</span><strong>Sieg {formatPoints(competition.winPoints)} · Unentschieden {formatPoints(competition.drawPoints)} · Niederlage {formatPoints(competition.lossPoints)}</strong><em>Bei Punktgleichheit entscheidet KDA. Ohne eingetragene Match-Ergebnisse gilt ausschließlich KDA.</em></div>
+                  <button className="button button--twitch" disabled={siteSaving} onClick={() => void saveCompetitionSettings()}>{siteSaving ? 'Wird gespeichert …' : 'Turniermodus & Wertung veröffentlichen'}</button>
+                </div>
               ) : settingsTab === 'scoring' ? (
                 <div className="settings-content">
                   <p className="muted">Passe die Punktegewichtung global an. Die Werte gelten für die Ranglisten der Gruppenphase und für alle KDA-Punkte in der K.O.-Phase.</p>
@@ -1261,29 +1381,32 @@ function App() {
                 <select id="group-count" className="select-input" value={state.groupCount} onChange={(event) => setState((current) => ({ ...current, groupCount: Number(event.target.value), knockoutBracket: null }))}>{Array.from({ length: 10 }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}</select>
                 <button className="button" onClick={createGroups}>Gruppen automatisch erstellen</button>
               </div>
-              <div className="plan-card"><span>AUTO PLAN</span><strong>{planText(previewPlan)}</strong><em>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} pro Spieler</em></div>
+              <div className="plan-card"><span>AUTO PLAN</span><strong>{planText(previewPlan)}</strong><em>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} · {competition.teamSize}vs{competition.teamSize}</em></div>
             </section>
 
             {state.groups.map((group) => {
-              const standings = buildStandings(group, state.participants, state.stats, scoringWeights)
+              const groupMatches = state.groupMatches.filter((match) => match.groupId === group.id)
+              const standings = buildStandings(group, state.participants, state.stats, scoringWeights, state.groupMatches, competition)
               const qualified = activePlan?.qualifiersPerGroup ?? 0
+              const usesResults = groupMatches.some((match) => match.result !== null)
               return <section className="panel group-panel" key={group.id}>
-                <div className="section-heading"><div><span className="step">{group.name}</span><h2>{group.participantIds.length} Spieler</h2></div></div>
-                <h3>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'}</h3>
+                <div className="section-heading"><div><span className="step">{group.name}</span><h2>{group.participantIds.length} {competition.teamSize === 1 ? 'Spieler' : 'Teams'}</h2></div><span className="counter">{usesResults ? 'ERGEBNISWERTUNG + KDA' : 'KDA-ONLY'}</span></div>
+                <h3>Begegnungen · Jeder gegen jeden</h3>
+                <div className="group-match-list">{groupMatches.map((match) => {
+                  const left = participantMap.get(match.player1Id)?.name ?? 'Unbekannt'
+                  const right = participantMap.get(match.player2Id)?.name ?? 'Unbekannt'
+                  return <div className="group-match-row" key={match.id}><strong>{left}</strong><span>vs</span><strong>{right}</strong><select className="select-input select-input--compact" value={match.result ?? ''} onChange={(event) => updateGroupMatchResult(match.id, (event.target.value || null) as GroupMatchResult)}><option value="">Noch kein Ergebnis</option><option value="player1">Sieg · {left}</option><option value="draw">Unentschieden</option><option value="player2">Sieg · {right}</option></select></div>
+                })}</div>
+                <h3>{state.groupRoundCount} KDA-Runde{state.groupRoundCount === 1 ? '' : 'n'} · {competition.teamSize === 1 ? 'pro Spieler' : 'als Team-KDA'}</h3>
                 <div className="stats-wrap"><table className="stats-table" style={{ minWidth: `${Math.max(780, 180 + state.groupRoundCount * 190)}px` }}>
-                  <thead><tr><th>Spieler</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>S{round} K</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>Gesamt</th></tr></thead>
+                  <thead><tr><th>{competition.teamSize === 1 ? 'Spieler' : 'Team'}</th>{Array.from({ length: state.groupRoundCount }, (_, index) => index + 1).flatMap((round) => [<th key={`${round}k`}>S{round} K</th>, <th key={`${round}a`}>A</th>, <th key={`${round}d`}>D</th>, <th key={`${round}p`}>Pkt.</th>])}<th>KDA gesamt</th></tr></thead>
                   <tbody>{group.participantIds.map((participantId) => {
                     const participantStats = normalizeParticipantStats(state.stats[participantId], state.groupRoundCount)
                     const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)
-                    return <tr key={participantId}><th className="player-cell">{participantMap.get(participantId)?.name ?? 'Unbekannt'}</th>{participantStats.rounds.flatMap((round, roundIndex) => [
-                      <td key={`${roundIndex}k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,
-                      <td key={`${roundIndex}a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,
-                      <td key={`${roundIndex}d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,
-                      <td className={calculateRoundScore(round, scoringWeights) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round, scoringWeights))}</td>,
-                    ])}<td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td></tr>
+                    return <tr key={participantId}><th className="player-cell">{participantMap.get(participantId)?.name ?? 'Unbekannt'}</th>{participantStats.rounds.flatMap((round, roundIndex) => [<td key={`${roundIndex}k`}><StatInput value={round.kills} onChange={(value) => updateStat(participantId, roundIndex, 'kills', value)} /></td>,<td key={`${roundIndex}a`}><StatInput value={round.assists} onChange={(value) => updateStat(participantId, roundIndex, 'assists', value)} /></td>,<td key={`${roundIndex}d`}><StatInput value={round.deaths} onChange={(value) => updateStat(participantId, roundIndex, 'deaths', value)} /></td>,<td className={calculateRoundScore(round, scoringWeights) < 0 ? 'points points--negative' : 'points'} key={`${roundIndex}p`}>{formatPoints(calculateRoundScore(round, scoringWeights))}</td>])}<td className={total < 0 ? 'total total--negative' : 'total'}>{formatPoints(total)}</td></tr>
                   })}</tbody>
                 </table></div>
-                <div className="standings-list">{standings.map((row, index) => <div className={`standing ${index < qualified ? 'standing--qualified' : ''}`} key={row.participantId}><span className="standing__rank">{index + 1}</span><strong>{row.name}</strong><span className="standing__kda">{row.kills} K · {row.assists} A · {row.deaths} D</span><span className="standing__points">{formatPoints(row.totalPoints)} Pkt.</span>{index < qualified && <span className="qualified-tag">Q</span>}</div>)}</div>
+                <div className="standings-list">{standings.map((row, index) => <div className={`standing ${index < qualified ? 'standing--qualified' : ''}`} key={row.participantId}><span className="standing__rank">{index + 1}</span><strong>{row.name}</strong>{usesResults && <span className="standing__record">{row.wins} S · {row.draws} U · {row.losses} N · {formatPoints(row.matchPoints)} Tab.-Pkt.</span>}<span className="standing__kda">KDA {formatPoints(row.totalPoints)} · {row.kills} K · {row.assists} A · {row.deaths} D</span>{index < qualified && <span className="qualified-tag">Q</span>}</div>)}</div>
               </section>
             })}
 
@@ -1301,6 +1424,7 @@ function App() {
                   matchIndex={matchIndex}
                   participantMap={participantMap}
                   scoringWeights={scoringWeights}
+                  onResult={updateKoResult}
                   onRoundCount={updateKoRoundCount}
                   onStat={updateKoStat}
                   onWinner={selectWinner}
@@ -1354,6 +1478,7 @@ function KnockoutMatchCard({
   matchIndex,
   participantMap,
   scoringWeights,
+  onResult,
   onRoundCount,
   onStat,
   onWinner,
@@ -1363,6 +1488,7 @@ function KnockoutMatchCard({
   matchIndex: number
   participantMap: Map<string, Participant>
   scoringWeights: ScoringWeights
+  onResult: (roundIndex: number, matchIndex: number, result: GroupMatchResult) => void
   onRoundCount: (roundIndex: number, matchIndex: number, count: number) => void
   onStat: (roundIndex: number, matchIndex: number, participantId: string, kdaRoundIndex: number, field: keyof RoundStats, value: string) => void
   onWinner: (roundIndex: number, matchIndex: number, winnerId: string) => void
@@ -1370,6 +1496,7 @@ function KnockoutMatchCard({
   const playerIds = [match.player1Id, match.player2Id]
   return <div className="match-card">
     <span className="match-number">MATCH {matchIndex + 1}</span>
+    <label className="ko-result-control"><span>Ergebnis</span><select className="select-input select-input--compact" disabled={!match.player1Id || !match.player2Id} value={match.result ?? ''} onChange={(event) => onResult(roundIndex, matchIndex, (event.target.value || null) as GroupMatchResult)}><option value="">Noch kein Ergebnis</option><option value="player1">Sieg links</option><option value="draw">Unentschieden</option><option value="player2">Sieg rechts</option></select></label>
     <div className="ko-round-control"><span>KDA-Runden</span><select className="select-input select-input--compact" value={match.kdaRoundCount || 1} onChange={(event) => onRoundCount(roundIndex, matchIndex, Number(event.target.value))}>{[1, 2, 3].map((count) => <option key={count} value={count}>{count}</option>)}</select></div>
 
     {playerIds.map((participantId, playerIndex) => {
@@ -1390,7 +1517,7 @@ function KnockoutMatchCard({
     })}
 
     <select className="winner-select" disabled={!match.player1Id || !match.player2Id} value={match.winnerId ?? ''} onChange={(event) => onWinner(roundIndex, matchIndex, event.target.value)}>
-      <option value="">Sieger wählen</option>
+      <option value="">{match.result === 'draw' ? 'Weiterkommenden nach Unentschieden wählen' : 'Sieger / Weiterkommenden wählen'}</option>
       {match.player1Id && <option value={match.player1Id}>{participantMap.get(match.player1Id)?.name}</option>}
       {match.player2Id && <option value={match.player2Id}>{participantMap.get(match.player2Id)?.name}</option>}
     </select>

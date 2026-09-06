@@ -1,6 +1,8 @@
 export type Participant = {
   id: string
   name: string
+  teamSize: number
+  members: string[]
 }
 
 export type RoundStats = {
@@ -19,6 +21,23 @@ export type TournamentGroup = {
   participantIds: string[]
 }
 
+export type GroupMatchResult = 'player1' | 'draw' | 'player2' | null
+
+export type GroupMatch = {
+  id: string
+  groupId: string
+  player1Id: string
+  player2Id: string
+  result: GroupMatchResult
+}
+
+export type CompetitionSettings = {
+  teamSize: number
+  winPoints: number
+  drawPoints: number
+  lossPoints: number
+}
+
 export type StandingRow = {
   participantId: string
   name: string
@@ -26,6 +45,11 @@ export type StandingRow = {
   kills: number
   assists: number
   deaths: number
+  wins: number
+  draws: number
+  losses: number
+  matchPoints: number
+  usesResults: boolean
 }
 
 export type QualificationPlan = {
@@ -50,6 +74,7 @@ export type KnockoutMatch = {
   player1Id: string | null
   player2Id: string | null
   winnerId: string | null
+  result: GroupMatchResult
   kdaRoundCount: number
   stats: Record<string, ParticipantStats>
 }
@@ -92,6 +117,7 @@ export type TournamentState = {
   groupCount: number
   groupRoundCount: number
   groups: TournamentGroup[]
+  groupMatches: GroupMatch[]
   stats: Record<string, ParticipantStats>
   knockoutBracket: KnockoutBracket | null
 }

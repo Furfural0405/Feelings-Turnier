@@ -1,5 +1,8 @@
 import { calculateTotalScore, DEFAULT_SCORING_WEIGHTS, emptyParticipantStats } from './scoring'
 import type {
+  CompetitionSettings,
+  GroupMatch,
+  GroupMatchResult,
   KnockoutBracket,
   KnockoutMatch,
   Participant,
@@ -10,6 +13,13 @@ import type {
   StandingRow,
   TournamentGroup,
 } from '../types'
+
+const DEFAULT_COMPETITION: CompetitionSettings = {
+  teamSize: 1,
+  winPoints: 3,
+  drawPoints: 1,
+  lossPoints: 0,
+}
 
 export function shuffle<T>(items: T[]): T[] {
   const copy = [...items]
@@ -36,39 +46,85 @@ export function distributeIntoGroups(participants: Participant[], groupCount: nu
   return groups
 }
 
+export function createGroupMatches(groups: TournamentGroup[]): GroupMatch[] {
+  return groups.flatMap((group) => {
+    const matches: GroupMatch[] = []
+    for (let i = 0; i < group.participantIds.length; i += 1) {
+      for (let j = i + 1; j < group.participantIds.length; j += 1) {
+        matches.push({
+          id: `${group.id}-m${matches.length + 1}`,
+          groupId: group.id,
+          player1Id: group.participantIds[i],
+          player2Id: group.participantIds[j],
+          result: null,
+        })
+      }
+    }
+    return matches
+  })
+}
+
 export function buildStandings(
   group: TournamentGroup,
   participants: Participant[],
   stats: Record<string, ParticipantStats>,
   scoringWeights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
+  allMatches: GroupMatch[] = [],
+  competition: CompetitionSettings = DEFAULT_COMPETITION,
 ): StandingRow[] {
   const participantMap = new Map(participants.map((participant) => [participant.id, participant]))
+  const matches = allMatches.filter((match) => match.groupId === group.id)
+  const usesResults = matches.some((match) => match.result !== null)
 
-  return group.participantIds
-    .map((participantId) => {
-      const participant = participantMap.get(participantId)
-      const participantStats = stats[participantId] ?? emptyParticipantStats()
-      const kills = participantStats.rounds.reduce((sum, round) => sum + round.kills, 0)
-      const assists = participantStats.rounds.reduce((sum, round) => sum + round.assists, 0)
-      const deaths = participantStats.rounds.reduce((sum, round) => sum + round.deaths, 0)
+  const rows = group.participantIds.map((participantId) => {
+    const participant = participantMap.get(participantId)
+    const participantStats = stats[participantId] ?? emptyParticipantStats()
+    const kills = participantStats.rounds.reduce((sum, round) => sum + round.kills, 0)
+    const assists = participantStats.rounds.reduce((sum, round) => sum + round.assists, 0)
+    const deaths = participantStats.rounds.reduce((sum, round) => sum + round.deaths, 0)
+    let wins = 0
+    let draws = 0
+    let losses = 0
 
-      return {
-        participantId,
-        name: participant?.name ?? 'Unbekannt',
-        totalPoints: calculateTotalScore(participantStats, scoringWeights),
-        kills,
-        assists,
-        deaths,
+    for (const match of matches) {
+      if (!match.result || (match.player1Id !== participantId && match.player2Id !== participantId)) continue
+      if (match.result === 'draw') {
+        draws += 1
+      } else {
+        const isPlayer1 = match.player1Id === participantId
+        const won = (match.result === 'player1' && isPlayer1) || (match.result === 'player2' && !isPlayer1)
+        if (won) wins += 1
+        else losses += 1
       }
-    })
-    .sort((a, b) => {
-      if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints
-      const aParticipation = a.kills + a.assists
-      const bParticipation = b.kills + b.assists
-      if (bParticipation !== aParticipation) return bParticipation - aParticipation
-      if (a.deaths !== b.deaths) return a.deaths - b.deaths
-      return a.name.localeCompare(b.name, 'de')
-    })
+    }
+
+    return {
+      participantId,
+      name: participant?.name ?? 'Unbekannt',
+      totalPoints: calculateTotalScore(participantStats, scoringWeights),
+      kills,
+      assists,
+      deaths,
+      wins,
+      draws,
+      losses,
+      matchPoints: wins * competition.winPoints + draws * competition.drawPoints + losses * competition.lossPoints,
+      usesResults,
+    }
+  })
+
+  return rows.sort((a, b) => {
+    if (usesResults) {
+      if (b.matchPoints !== a.matchPoints) return b.matchPoints - a.matchPoints
+      if (b.wins !== a.wins) return b.wins - a.wins
+    }
+    if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints
+    const aParticipation = a.kills + a.assists
+    const bParticipation = b.kills + b.assists
+    if (bParticipation !== aParticipation) return bParticipation - aParticipation
+    if (a.deaths !== b.deaths) return a.deaths - b.deaths
+    return a.name.localeCompare(b.name, 'de')
+  })
 }
 
 function isPowerOfTwo(value: number): boolean {
@@ -78,96 +134,46 @@ function isPowerOfTwo(value: number): boolean {
 export function createQualificationPlan(participantCount: number, requestedGroupCount: number): QualificationPlan | null {
   const participants = Math.max(0, Math.trunc(participantCount))
   const requested = Math.max(1, Math.min(10, Math.trunc(requestedGroupCount)))
-
   if (participants < 4) return null
 
   if (participants < 8) {
     if (requested <= 1) {
-      return {
-        requestedGroupCount: requested,
-        groupCount: 1,
-        qualifiersPerGroup: 4,
-        knockoutSize: 4,
-        adjusted: false,
-        smallestGroupSize: participants,
-        smallTournamentOverride: true,
-      }
+      return { requestedGroupCount: requested, groupCount: 1, qualifiersPerGroup: 4, knockoutSize: 4, adjusted: false, smallestGroupSize: participants, smallTournamentOverride: true }
     }
-
-    return {
-      requestedGroupCount: requested,
-      groupCount: 2,
-      qualifiersPerGroup: 2,
-      knockoutSize: 4,
-      adjusted: requested !== 2,
-      smallestGroupSize: Math.floor(participants / 2),
-      smallTournamentOverride: true,
-    }
+    return { requestedGroupCount: requested, groupCount: 2, qualifiersPerGroup: 2, knockoutSize: 4, adjusted: requested !== 2, smallestGroupSize: Math.floor(participants / 2), smallTournamentOverride: true }
   }
 
   if (requested === 1) {
     const maxQualifiers = Math.min(32, Math.floor(participants / 2))
     for (const knockoutSize of [32, 16, 8, 4]) {
       if (knockoutSize <= maxQualifiers) {
-        return {
-          requestedGroupCount: requested,
-          groupCount: 1,
-          qualifiersPerGroup: knockoutSize,
-          knockoutSize,
-          adjusted: false,
-          smallestGroupSize: participants,
-          smallTournamentOverride: false,
-        }
+        return { requestedGroupCount: requested, groupCount: 1, qualifiersPerGroup: knockoutSize, knockoutSize, adjusted: false, smallestGroupSize: participants, smallTournamentOverride: false }
       }
     }
     return null
   }
 
   const maximumGroups = Math.min(requested, 10, Math.floor(participants / 4))
-
   for (let groupCount = maximumGroups; groupCount >= 2; groupCount -= 1) {
     const smallestGroupSize = Math.floor(participants / groupCount)
-    const halfLimit = Math.floor(smallestGroupSize / 2)
-    const bracketLimit = Math.floor(32 / groupCount)
-    const maxQualifiersPerGroup = Math.min(halfLimit, bracketLimit)
-
+    const maxQualifiersPerGroup = Math.min(Math.floor(smallestGroupSize / 2), Math.floor(32 / groupCount))
     for (let qualifiersPerGroup = maxQualifiersPerGroup; qualifiersPerGroup >= 2; qualifiersPerGroup -= 1) {
       const knockoutSize = groupCount * qualifiersPerGroup
       if (!isPowerOfTwo(knockoutSize)) continue
-
-      return {
-        requestedGroupCount: requested,
-        groupCount,
-        qualifiersPerGroup,
-        knockoutSize,
-        adjusted: groupCount !== requested,
-        smallestGroupSize,
-        smallTournamentOverride: false,
-      }
+      return { requestedGroupCount: requested, groupCount, qualifiersPerGroup, knockoutSize, adjusted: groupCount !== requested, smallestGroupSize, smallTournamentOverride: false }
     }
   }
-
   return null
 }
 
-export function createQualificationPlanForExistingGroups(
-  participantCount: number,
-  groupCount: number,
-): QualificationPlan | null {
+export function createQualificationPlanForExistingGroups(participantCount: number, groupCount: number): QualificationPlan | null {
   const plan = createQualificationPlan(participantCount, groupCount)
   if (!plan || plan.groupCount !== groupCount) return null
   return plan
 }
 
 function newMatch(id: string, player1Id: string | null, player2Id: string | null): KnockoutMatch {
-  return {
-    id,
-    player1Id,
-    player2Id,
-    winnerId: null,
-    kdaRoundCount: 1,
-    stats: {},
-  }
+  return { id, player1Id, player2Id, winnerId: null, result: null, kdaRoundCount: 1, stats: {} }
 }
 
 function orderedGroupIndex(groups: TournamentGroup[]): Map<string, number> {
@@ -187,7 +193,6 @@ function pairSingleGroup(qualifiers: QualifiedPlayer[]): KnockoutMatch[] {
 
 function pairCrossGroup(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]): KnockoutMatch[] {
   if (groups.length < 2 || qualifiers.length < 4) return []
-
   const groupOrder = orderedGroupIndex(groups)
   const qualifiersPerGroup = Math.max(...qualifiers.map((qualifier) => qualifier.groupRank))
   const matches: KnockoutMatch[] = []
@@ -196,22 +201,15 @@ function pairCrossGroup(qualifiers: QualifiedPlayer[], groups: TournamentGroup[]
   for (let rankIndex = 0; rankIndex < half; rankIndex += 1) {
     const highRank = rankIndex + 1
     const lowRank = qualifiersPerGroup - rankIndex
-    const highPot = qualifiers
-      .filter((qualifier) => qualifier.groupRank === highRank)
-      .sort((a, b) => (groupOrder.get(a.groupId) ?? 0) - (groupOrder.get(b.groupId) ?? 0))
-    const lowPot = qualifiers
-      .filter((qualifier) => qualifier.groupRank === lowRank)
-      .sort((a, b) => (groupOrder.get(a.groupId) ?? 0) - (groupOrder.get(b.groupId) ?? 0))
-
+    const highPot = qualifiers.filter((q) => q.groupRank === highRank).sort((a, b) => (groupOrder.get(a.groupId) ?? 0) - (groupOrder.get(b.groupId) ?? 0))
+    const lowPot = qualifiers.filter((q) => q.groupRank === lowRank).sort((a, b) => (groupOrder.get(a.groupId) ?? 0) - (groupOrder.get(b.groupId) ?? 0))
     if (highPot.length !== groups.length || lowPot.length !== groups.length) return []
-
     const rotation = groups.length === 2 ? 1 : (rankIndex % (groups.length - 1)) + 1
     highPot.forEach((highSeed, index) => {
       const lowSeed = lowPot[(index + rotation) % lowPot.length]
       matches.push(newMatch(`ko-r0-m${matches.length}`, highSeed.participantId, lowSeed.participantId))
     })
   }
-
   return matches
 }
 
@@ -221,32 +219,19 @@ export function createGlobalKnockoutBracket(
   stats: Record<string, ParticipantStats>,
   qualifiersPerGroup: number,
   scoringWeights: ScoringWeights = DEFAULT_SCORING_WEIGHTS,
+  groupMatches: GroupMatch[] = [],
+  competition: CompetitionSettings = DEFAULT_COMPETITION,
 ): KnockoutBracket {
   const qualifiers: QualifiedPlayer[] = groups.flatMap((group) =>
-    buildStandings(group, participants, stats, scoringWeights)
+    buildStandings(group, participants, stats, scoringWeights, groupMatches, competition)
       .slice(0, qualifiersPerGroup)
-      .map((row, index) => ({
-        participantId: row.participantId,
-        groupId: group.id,
-        groupName: group.name,
-        groupRank: index + 1,
-      })),
+      .map((row, index) => ({ participantId: row.participantId, groupId: group.id, groupName: group.name, groupRank: index + 1 })),
   )
 
   const firstRound = groups.length === 1 ? pairSingleGroup(qualifiers) : pairCrossGroup(qualifiers, groups)
   const rounds: KnockoutMatch[][] = []
-
-  if (firstRound.length * 2 !== qualifiers.length) {
-    return {
-      qualifierIds: qualifiers.map((qualifier) => qualifier.participantId),
-      qualifiers,
-      createdAt: new Date().toISOString(),
-      rounds: [],
-    }
-  }
-
+  if (firstRound.length * 2 !== qualifiers.length) return { qualifierIds: qualifiers.map((q) => q.participantId), qualifiers, createdAt: new Date().toISOString(), rounds: [] }
   rounds.push(firstRound)
-
   let matchesInNextRound = firstRound.length / 2
   let roundIndex = 1
   while (matchesInNextRound >= 1) {
@@ -254,30 +239,16 @@ export function createGlobalKnockoutBracket(
     matchesInNextRound /= 2
     roundIndex += 1
   }
-
-  return {
-    qualifierIds: qualifiers.map((qualifier) => qualifier.participantId),
-    qualifiers,
-    createdAt: new Date().toISOString(),
-    rounds,
-  }
+  return { qualifierIds: qualifiers.map((q) => q.participantId), qualifiers, createdAt: new Date().toISOString(), rounds }
 }
 
-export function updateBracketWinner(
-  bracket: KnockoutBracket,
-  roundIndex: number,
-  matchIndex: number,
-  winnerId: string | null,
-): KnockoutBracket {
+export function updateBracketWinner(bracket: KnockoutBracket, roundIndex: number, matchIndex: number, winnerId: string | null): KnockoutBracket {
   const rounds = bracket.rounds.map((round) => round.map((match) => ({
     ...match,
-    stats: Object.fromEntries(Object.entries(match.stats ?? {}).map(([participantId, stats]) => [participantId, {
-      rounds: stats.rounds.map((roundStats) => ({ ...roundStats })),
-    }])),
+    stats: Object.fromEntries(Object.entries(match.stats ?? {}).map(([participantId, stats]) => [participantId, { rounds: stats.rounds.map((roundStats) => ({ ...roundStats })) }])),
   })))
   const target = rounds[roundIndex]?.[matchIndex]
   if (!target) return bracket
-
   const allowed = [target.player1Id, target.player2Id].filter(Boolean)
   target.winnerId = winnerId && allowed.includes(winnerId) ? winnerId : null
 
@@ -289,11 +260,13 @@ export function updateBracketWinner(
       const participantsChanged = match.player1Id !== player1Id || match.player2Id !== player2Id
       match.player1Id = player1Id
       match.player2Id = player2Id
-      if (participantsChanged) match.stats = {}
+      if (participantsChanged) {
+        match.stats = {}
+        match.result = null
+      }
       if (match.winnerId !== player1Id && match.winnerId !== player2Id) match.winnerId = null
     })
   }
-
   return { ...bracket, rounds }
 }
 
@@ -305,4 +278,11 @@ export function roundName(totalPlayers: number, roundIndex: number): string {
   if (playersInRound === 16) return 'Achtelfinale'
   if (playersInRound === 32) return 'Sechzehntelfinale'
   return `Top ${playersInRound}`
+}
+
+export function resultLabel(result: GroupMatchResult): string {
+  if (result === 'player1') return 'Sieg links'
+  if (result === 'player2') return 'Sieg rechts'
+  if (result === 'draw') return 'Unentschieden'
+  return 'Noch kein Ergebnis'
 }

@@ -208,6 +208,38 @@ function normalizeBracket(bracket: KnockoutBracket | null | undefined): Knockout
   }
 }
 
+function normalizePublicTournamentState(value: unknown): TournamentState | null {
+  const candidate = value && typeof value === 'object'
+    ? value as { participants?: unknown; state?: unknown }
+    : {}
+  const payload = candidate.state && typeof candidate.state === 'object'
+    ? candidate.state as Partial<StoredTournamentState>
+    : null
+
+  if (!payload || !Array.isArray(payload.groups) || payload.groups.length === 0) return null
+
+  const participants = Array.isArray(candidate.participants)
+    ? candidate.participants.map(normalizeParticipant).filter((participant) => participant.id && participant.name)
+    : []
+  const groupRoundCount = clamp(Number(payload.groupRoundCount) || 3, 1, 7)
+  const rawStats = payload.stats && typeof payload.stats === 'object'
+    ? payload.stats as Record<string, ParticipantStats>
+    : {}
+
+  return {
+    participants,
+    groupCount: clamp(Number(payload.groupCount) || payload.groups.length, 1, 10),
+    groupRoundCount,
+    groups: payload.groups,
+    groupMatches: Array.isArray(payload.groupMatches) ? payload.groupMatches : [],
+    stats: Object.fromEntries(participants.map((participant) => [
+      participant.id,
+      normalizeParticipantStats(rawStats[participant.id], groupRoundCount),
+    ])),
+    knockoutBracket: normalizeBracket(payload.knockoutBracket),
+  }
+}
+
 function planText(plan: QualificationPlan | null): string {
   if (!plan) return 'Ab 4 Teilnehmern kann eine K.O.-Phase erzeugt werden.'
   const override = plan.smallTournamentOverride ? ' · Sonderregel unter 8 Teilnehmern' : ''
@@ -227,6 +259,7 @@ function storedState(state: TournamentState): StoredTournamentState {
 
 function App() {
   const [state, setState] = useState<TournamentState>(DEFAULT_STATE)
+  const [publicState, setPublicState] = useState<TournamentState | null>(null)
   const [hero, setHero] = useState<HeroContent>(DEFAULT_HERO)
   const [background, setBackground] = useState<SiteBackgroundSettings>(DEFAULT_BACKGROUND)
   const [scoringWeights, setScoringWeights] = useState<ScoringWeights>(DEFAULT_SCORING)
@@ -261,7 +294,7 @@ function App() {
 
   const isAdmin = Boolean(profile?.approved && profile.role === 'admin')
   const isCreator = Boolean(isAdmin && profile?.is_creator)
-  const registrationIsOpen = competition.registrationEnabled && state.groups.length === 0
+  const registrationIsOpen = competition.registrationEnabled && (isAdmin ? state.groups.length === 0 : (publicState?.groups.length ?? 0) === 0)
   const participantMap = useMemo(
     () => new Map(state.participants.map((participant) => [participant.id, participant])),
     [state.participants],
@@ -433,6 +466,42 @@ function App() {
     void loadSiteSettings()
     return () => { cancelled = true }
   }, [])
+
+  useEffect(() => {
+    if (!supabase || isAdmin) {
+      if (isAdmin) setPublicState(null)
+      return
+    }
+
+    let cancelled = false
+
+    async function refreshPublicTournament() {
+      const { data, error } = await supabase!.rpc('get_public_tournament_snapshot')
+      if (cancelled || error || !data) return
+
+      const snapshot = data as {
+        competition?: unknown
+        scoring?: unknown
+        participants?: unknown
+        state?: unknown
+      }
+
+      if (snapshot.competition) setCompetition(normalizeCompetition(snapshot.competition))
+      if (snapshot.scoring) setScoringWeights(normalizeScoring(snapshot.scoring))
+      setPublicState(normalizePublicTournamentState(snapshot))
+    }
+
+    void refreshPublicTournament()
+    const interval = window.setInterval(() => void refreshPublicTournament(), 2000)
+    const onFocus = () => void refreshPublicTournament()
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [isAdmin])
 
   useEffect(() => {
     if (!supabase) {
@@ -1435,7 +1504,7 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
           </>}
         </section>
 
-        <section className="panel scoring-panel">
+        {isAdmin && <section className="panel scoring-panel">
           <div className="section-heading"><div><span className="step">02</span><h2>KDA-Wertung</h2></div></div>
           <div className="score-rules">
             <div className="rule"><strong>+{formatPoints(scoringWeights.kill)}</strong><span>Kill</span></div>
@@ -1444,11 +1513,33 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
             <div className="rule"><strong>+{formatPoints(scoringWeights.positiveBonus)}</strong><span>K + A &gt; D</span></div>
             <div className="rule rule--negative"><strong>−{formatPoints(scoringWeights.negativePenalty)}</strong><span>K + A &lt; D</span></div>
           </div>
-        </section>
+        </section>}
 
-        {!isAdmin ? (
-          <section className="panel locked-panel"><div className="lock-icon">⌁</div><div><p className="eyebrow">ADMIN CHANNEL</p><h2>Turniersteuerung geschützt</h2><p className="muted">Gruppen, Ranglisten, Teilnehmernamen, KDA-Eingaben und K.O.-Matches sind nur für freigeschaltete Accounts sichtbar.</p>{user && !profile?.approved && <p className="pending-note">Dein Account ist angemeldet, wartet aber noch auf Freischaltung.</p>}</div></section>
-        ) : (
+        {!isAdmin && publicState && publicState.groups.length > 0 && <>
+          <section className="panel public-live-header">
+            <div className="section-heading">
+              <div><span className="step">LIVE</span><h2>Turnierstand</h2></div>
+              <span className="counter">AUTO-AKTUALISIERUNG · 2 SEK.</span>
+            </div>
+            <p className="muted">Gruppen, Ergebnisse und KDA-Werte werden automatisch aktualisiert. Ein Neuladen der Seite ist nicht erforderlich.</p>
+          </section>
+
+          {publicState.groups.map((group) => <PublicGroupSection
+            key={group.id}
+            group={group}
+            state={publicState}
+            competition={competition}
+            scoringWeights={scoringWeights}
+          />)}
+
+          {publicState.knockoutBracket && <PublicKnockoutSection
+            state={publicState}
+            competition={competition}
+            scoringWeights={scoringWeights}
+          />}
+        </>}
+
+        {isAdmin && (
           <>
             <section className="panel settings-panel" id="einstellungen">
               <div className="section-heading"><div><span className="step">ADMIN</span><h2>Website & Turnier-Einstellungen</h2></div></div>
@@ -1678,6 +1769,188 @@ Dabei werden alle ${participantCount} vorhandenen Anmeldungen sowie Gruppen, Mat
       {showLogin && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false) }}><div className="auth-modal"><button className="modal-close" onClick={() => setShowLogin(false)}>×</button><p className="eyebrow">SECURE ACCESS</p><h2>{authMode === 'login' ? 'Admin Login' : 'Account registrieren'}</h2><p className="muted">Neue Accounts werden ohne Bestätigungs-Mail angelegt und bleiben zunächst gesperrt. Ausschließlich der Ersteller/Admin kann sie freischalten.</p><form className="auth-form" onSubmit={(event) => void handleAuth(event)}><label>E-Mail<input className="text-input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></label><label>Passwort<input className="text-input" type="password" minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} /></label><button className="button button--twitch" disabled={authBusy || authLoading}>{authBusy ? 'Bitte warten …' : authMode === 'login' ? 'Einloggen' : 'Registrieren'}</button></form><button className="auth-switch" onClick={() => setAuthMode((mode) => mode === 'login' ? 'register' : 'login')}>{authMode === 'login' ? 'Noch keinen Account? Registrieren' : 'Bereits registriert? Zum Login'}</button></div></div>}
     </div>
   )
+}
+
+function PublicGroupSection({
+  group,
+  state,
+  competition,
+  scoringWeights,
+}: {
+  group: TournamentState['groups'][number]
+  state: TournamentState
+  competition: CompetitionSettings
+  scoringWeights: ScoringWeights
+}) {
+  const participantMap = new Map(state.participants.map((participant) => [participant.id, participant]))
+  const groupMatches = state.groupMatches.filter((match) => match.groupId === group.id)
+  const standings = buildStandings(group, state.participants, state.stats, scoringWeights, state.groupMatches, competition)
+
+  return <section className="panel group-panel public-group-panel">
+    <div className="section-heading">
+      <div><span className="step">{group.name}</span><h2>{competition.teamSize === 1 ? 'Spieler' : 'Teams'} & Ergebnisse</h2></div>
+      <span className="counter">{group.participantIds.length} {competition.teamSize === 1 ? 'SPIELER' : 'TEAMS'}</span>
+    </div>
+
+    <div className="public-match-list">
+      {groupMatches.map((match) => {
+        const left = participantMap.get(match.player1Id)?.name ?? 'Unbekannt'
+        const right = participantMap.get(match.player2Id)?.name ?? 'Unbekannt'
+        const result = match.result === 'player1'
+          ? `Sieg · ${left}`
+          : match.result === 'player2'
+            ? `Sieg · ${right}`
+            : match.result === 'draw'
+              ? 'Unentschieden'
+              : 'Noch kein Ergebnis'
+        return <div className="public-match-row" key={match.id}>
+          <strong>{left}</strong>
+          <span className="public-match-vs">vs</span>
+          <strong>{right}</strong>
+          <em>{result}</em>
+        </div>
+      })}
+    </div>
+
+    <div className="stats-wrap">
+      <table className="stats-table public-standings-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>{competition.teamSize === 1 ? 'Spieler' : 'Team'}</th>
+            <th>Siege</th>
+            <th>Unentschieden</th>
+            <th>Niederlagen</th>
+            <th>Kills</th>
+            <th>Deaths</th>
+            <th>Assists</th>
+            <th>Punkte (S/U/N)</th>
+            <th>Punkte (KDA)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {standings.map((row, index) => <tr key={row.participantId}>
+            <td className="public-rank">{index + 1}</td>
+            <th className="player-cell">{row.name}</th>
+            <td>{row.wins}</td>
+            <td>{row.draws}</td>
+            <td>{row.losses}</td>
+            <td>{row.kills}</td>
+            <td>{row.deaths}</td>
+            <td>{row.assists}</td>
+            <td className="points">{formatPoints(row.matchPoints)}</td>
+            <td className={row.totalPoints < 0 ? 'points points--negative' : 'points'}>{formatPoints(row.totalPoints)}</td>
+          </tr>)}
+        </tbody>
+      </table>
+    </div>
+  </section>
+}
+
+function PublicKnockoutSection({
+  state,
+  competition,
+  scoringWeights,
+}: {
+  state: TournamentState
+  competition: CompetitionSettings
+  scoringWeights: ScoringWeights
+}) {
+  const bracket = state.knockoutBracket
+  if (!bracket) return null
+
+  const participantMap = new Map(state.participants.map((participant) => [participant.id, participant]))
+  const championId = bracket.rounds.at(-1)?.[0]?.winnerId ?? null
+
+  return <section className="panel ko-panel public-ko-panel">
+    <div className="section-heading">
+      <div><span className="step">K.O.</span><h2>Globale K.O.-Phase</h2></div>
+      {championId && <span className="champion-badge">CHAMPION · {participantMap.get(championId)?.name ?? 'Unbekannt'}</span>}
+    </div>
+    <p className="muted">Der K.O.-Baum wird automatisch aktualisiert. Angezeigt werden Ergebnisse, KDA-Werte und gegebenenfalls manuelle Adminentscheidungen.</p>
+
+    <div className="bracket public-bracket">
+      {bracket.rounds.map((round, roundIndex) => <div className="bracket-round" key={roundIndex}>
+        <h4>{roundName(bracket.qualifierIds.length, roundIndex)}</h4>
+        <div className="round-matches">
+          {round.map((match, matchIndex) => <PublicKnockoutMatchCard
+            key={match.id}
+            match={match}
+            matchIndex={matchIndex}
+            participantMap={participantMap}
+            scoringWeights={scoringWeights}
+            teamSize={competition.teamSize}
+          />)}
+        </div>
+      </div>)}
+    </div>
+  </section>
+}
+
+function PublicKnockoutMatchCard({
+  match,
+  matchIndex,
+  participantMap,
+  scoringWeights,
+  teamSize,
+}: {
+  match: KnockoutMatch
+  matchIndex: number
+  participantMap: Map<string, Participant>
+  scoringWeights: ScoringWeights
+  teamSize: number
+}) {
+  const automaticWinnerId = match.result === 'player1'
+    ? match.player1Id
+    : match.result === 'player2'
+      ? match.player2Id
+      : null
+  const winnerName = match.winnerId ? participantMap.get(match.winnerId)?.name ?? 'Unbekannt' : null
+  const manualDecision = Boolean(match.winnerId && match.winnerId !== automaticWinnerId)
+  const resultLabel = winnerName
+    ? `${manualDecision ? 'Adminentscheidung' : 'Sieger'} · ${winnerName}`
+    : match.result === 'draw'
+      ? 'Unentschieden'
+      : 'Noch kein Ergebnis'
+
+  const playerIds = [match.player1Id, match.player2Id]
+
+  return <div className="match-card public-ko-match">
+    <span className="match-number">MATCH {matchIndex + 1}</span>
+    <div className={manualDecision ? 'public-ko-result public-ko-result--manual' : 'public-ko-result'}>
+      <strong>{resultLabel}</strong>
+      <span>{match.kdaRoundCount || 1} KDA-Runde{(match.kdaRoundCount || 1) === 1 ? '' : 'n'}</span>
+    </div>
+
+    {playerIds.map((participantId, playerIndex) => {
+      if (!participantId) {
+        return <div className="ko-player-block ko-player-block--empty" key={`public-empty-${playerIndex}`}>
+          <strong>TBD</strong>
+          <span>Wartet auf vorheriges Match</span>
+        </div>
+      }
+
+      const participantStats = normalizeParticipantStats(match.stats?.[participantId], match.kdaRoundCount || 1)
+      const kills = participantStats.rounds.reduce((sum, round) => sum + round.kills, 0)
+      const assists = participantStats.rounds.reduce((sum, round) => sum + round.assists, 0)
+      const deaths = participantStats.rounds.reduce((sum, round) => sum + round.deaths, 0)
+      const total = participantStats.rounds.reduce((sum, round) => sum + calculateRoundScore(round, scoringWeights), 0)
+      const playerName = participantMap.get(participantId)?.name ?? 'Unbekannt'
+
+      return <div className={match.winnerId === participantId ? 'ko-player-block ko-player-block--winner' : 'ko-player-block'} key={participantId}>
+        <div className="ko-player-title">
+          <strong>{playerName}</strong>
+          <span className={total < 0 ? 'points points--negative' : 'points'}>{formatPoints(total)} KDA-Pkt.</span>
+        </div>
+        <div className="public-ko-stats">
+          <span><strong>{kills}</strong> Kills</span>
+          <span><strong>{deaths}</strong> Deaths</span>
+          <span><strong>{assists}</strong> Assists</span>
+          <span><strong>{teamSize}vs{teamSize}</strong></span>
+        </div>
+      </div>
+    })}
+  </div>
 }
 
 function KnockoutMatchCard({

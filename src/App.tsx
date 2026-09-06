@@ -1619,9 +1619,11 @@ function KnockoutMatchCard({
   onWinner: (roundIndex: number, matchIndex: number, winnerId: string) => void
 }) {
   const playerIds = [match.player1Id, match.player2Id]
+  const player1Name = match.player1Id ? participantMap.get(match.player1Id)?.name ?? 'Teilnehmer/Team links' : 'Teilnehmer/Team links'
+  const player2Name = match.player2Id ? participantMap.get(match.player2Id)?.name ?? 'Teilnehmer/Team rechts' : 'Teilnehmer/Team rechts'
   return <div className="match-card">
     <span className="match-number">MATCH {matchIndex + 1}</span>
-    <label className="ko-result-control"><span>Ergebnis</span><select className="select-input select-input--compact" disabled={!match.player1Id || !match.player2Id} value={match.result ?? ''} onChange={(event) => onResult(roundIndex, matchIndex, (event.target.value || null) as GroupMatchResult)}><option value="">Noch kein Ergebnis</option><option value="player1">Sieg links</option><option value="draw">Unentschieden</option><option value="player2">Sieg rechts</option></select></label>
+    <label className="ko-result-control"><span>Ergebnis / Sieger</span><select className="select-input select-input--compact" disabled={!match.player1Id || !match.player2Id} value={match.result ?? ''} onChange={(event) => onResult(roundIndex, matchIndex, (event.target.value || null) as GroupMatchResult)}><option value="">Noch kein Ergebnis</option><option value="player1">{player1Name}</option><option value="draw">Unentschieden</option><option value="player2">{player2Name}</option></select></label>
     <div className="ko-round-control"><span>KDA-Runden</span><select className="select-input select-input--compact" value={match.kdaRoundCount || 1} onChange={(event) => onRoundCount(roundIndex, matchIndex, Number(event.target.value))}>{[1, 2, 3].map((count) => <option key={count} value={count}>{count}</option>)}</select></div>
 
     {playerIds.map((participantId, playerIndex) => {

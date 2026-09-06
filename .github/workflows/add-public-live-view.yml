@@ -1,0 +1,85 @@
+name: Add public live tournament view
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/add-public-live-view.yml'
+      - 'scripts/add_public_live_view.py'
+      - 'supabase/public_live_snapshot.sql'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: "public-live-view-patch"
+  cancel-in-progress: false
+
+jobs:
+  patch-test-commit:
+    runs-on: ubuntu-latest
+
+    env:
+      VITE_SUPABASE_URL: https://rwmzxgnbndoeioqksnyn.supabase.co
+      VITE_SUPABASE_PUBLISHABLE_KEY: sb_publishable_REhjSoFql5jeIPjI3mBwmw_zCjDuSAv
+
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Apply public live view
+        run: python scripts/add_public_live_view.py
+
+      - name: Verify feature markers
+        run: |
+          grep -q "get_public_tournament_snapshot" src/App.tsx
+          grep -q "function PublicGroupSection" src/App.tsx
+          grep -q "function PublicKnockoutSection" src/App.tsx
+          grep -q "AUTO-AKTUALISIERUNG" src/App.tsx
+          if grep -q "ADMIN CHANNEL" src/App.tsx; then
+            echo "ADMIN CHANNEL ist noch vorhanden."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Configure npm registry
+        run: npm config set registry https://registry.npmjs.org/
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript check
+        run: npm run lint
+
+      - name: Build website
+        run: npm run build
+
+      - name: Commit tested changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.tsx src/styles.css
+          if git diff --cached --quiet; then
+            echo "Öffentliche Live-Ansicht ist bereits eingebaut."
+          else
+            git commit -m "Add public live tournament standings and bracket"
+            git push origin HEAD:main
+          fi
+
+      - name: Wait for main update
+        run: sleep 3
+
+      - name: Trigger normal Pages deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl --fail-with-body             -X POST             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer ${GH_TOKEN}"             -H "X-GitHub-Api-Version: 2022-11-28"             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/static.yml/dispatches"             -d '{"ref":"main"}'
